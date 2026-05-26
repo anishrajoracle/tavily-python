@@ -1,16 +1,16 @@
-import os
 import array
 import re
-from typing import Union, Optional, Literal
+from typing import Callable, Literal, Optional, Sequence, Union
 
 import requests
 from tavily import TavilyClient
 
 try:
     import cohere
-    co = cohere.Client()
-except:
-    co = None
+except ImportError:
+    cohere = None
+
+co = None
 
 _ORACLE_IDENTIFIER = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 
@@ -31,6 +31,31 @@ def _read_lob(value):
     return value
 
 
+def _get_cohere_client():
+    global co
+
+    if co is not None:
+        return co
+
+    if cohere is None:
+        raise ImportError(
+            "The default hybrid RAG embedding and ranking functions require "
+            "the 'cohere' package. Install cohere or provide custom "
+            "embedding_function and ranking_function callables."
+        )
+
+    try:
+        co = cohere.Client()
+    except Exception as exc:
+        raise RuntimeError(
+            "Failed to initialize the Cohere client. Set the required Cohere "
+            "environment variables or provide custom embedding_function and "
+            "ranking_function callables."
+        ) from exc
+
+    return co
+
+
 def _validate_index(client):
     """
     Check that the index specified by the parameters exists and is a valid vector search index.
@@ -39,54 +64,63 @@ def _validate_index(client):
         ValueError: If the index does not exist, is not of type 'vectorSearch', or if the embeddings field
                     does not exist, is not of type 'vector', or has similarity other than 'cosine'.
     """
+    if not hasattr(client.collection, "list_search_indexes"):
+        raise ValueError("MongoDB collection must provide list_search_indexes().")
+
     index_exists = False
     for index in client.collection.list_search_indexes():
-        if index['name'] != client.index:
+        if index.get('name') != client.index:
             continue
-        
-        if index['type'] != 'vectorSearch':
+
+        if index.get('type') != 'vectorSearch':
             raise ValueError(f"Index '{client.index}' exists but is not of type "
                              "'vectorSearch'.")
-        
+
         field_exists = False
-        for field in index['latestDefinition']['fields']:
-            if field['path'] != client.embeddings_field:
+        fields = index.get('latestDefinition', {}).get('fields', [])
+        for field in fields:
+            if field.get('path') != client.embeddings_field:
                 continue
-            
-            if field['type'] != 'vector':
+
+            if field.get('type') != 'vector':
                 raise ValueError(f"Field '{client.embeddings_field}' exists "
                                  "but is not of type 'vector'.")
-            elif field['similarity'] != 'cosine':
+            elif field.get('similarity') != 'cosine':
                 raise ValueError(f"Field '{client.embeddings_field}' exists but has "
-                                 f"similarity '{field['similarity']}' instead of 'cosine'.")
-            
+                                 f"similarity '{field.get('similarity')}' instead of 'cosine'.")
+
             field_exists = True
             break
-        
+
         if not field_exists:
             raise ValueError(f"Field '{client.embeddings_field}' does not exist in "
-                             "index '{client.index}'.")
-        
+                             f"index '{client.index}'.")
+
         index_exists = True
-        
+
     if not index_exists:
         raise ValueError(f"Index '{client.index}' does not exist.")
 
-def _cohere_embed(texts, type):
-    return co.embed(
+
+def _cohere_embed(texts, input_type):
+    client = _get_cohere_client()
+    return client.embed(
         model='embed-english-v3.0',
         texts=texts,
-        input_type=type
+        input_type=input_type
     ).embeddings
 
+
 def _cohere_rerank(query, documents, top_n):
-    response = co.rerank(model='rerank-english-v3.0', query=query,
-                         documents=[doc['content'] for doc in documents], top_n=top_n)
-    
+    client = _get_cohere_client()
+    response = client.rerank(model='rerank-english-v3.0', query=query,
+                             documents=[doc['content'] for doc in documents], top_n=top_n)
+
     return [
         documents[result.index] | {'score': result.relevance_score}
         for result in response.results
     ]
+
 
 class TavilyHybridClient():
     def __init__(
@@ -99,20 +133,20 @@ class TavilyHybridClient():
             content_field: str = 'content',
             connection=None,
             table_name: Optional[str] = None,
-            embedding_function: Optional[callable] = None,
-            ranking_function: Optional[callable] = None,
+            embedding_function: Optional[Callable[[Sequence[str], str], Sequence[Sequence[float]]]] = None,
+            ranking_function: Optional[Callable[[str, list, int], list]] = None,
             session: Optional[requests.Session] = None
         ):
         '''
         A client for performing hybrid RAG using both the Tavily API and a local database.
-        
+
         Parameters:
         api_key (str): The Tavily API key. If this is set to None, it will be loaded from the environment variable TAVILY_API_KEY.
         db_provider (str): The database provider. Supported values are 'mongodb' and 'oracle'.
-        collection: The MongoDB collection that will be used for local search. Required when db_provider='mongodb'.
+        collection: The MongoDB collection object that will be used for local search. Required when db_provider='mongodb'.
         index (str): The MongoDB collection's vector search index. Required when db_provider='mongodb'.
-        embeddings_field (str): The name of the field in the collection that contains the embeddings.
-        content_field (str): The name of the field in the collection that contains the content.
+        embeddings_field (str): The name of the field in the database that contains the embeddings.
+        content_field (str): The name of the field in the database that contains the content.
         connection: A python-oracledb connection. Required when db_provider='oracle'.
         table_name (str): The Oracle table that stores content and vector embeddings. Required when db_provider='oracle'.
         embedding_function (callable): If provided, this function will be used to generate embeddings for the search query and documents.
@@ -121,10 +155,10 @@ class TavilyHybridClient():
         '''
 
         self.tavily = TavilyClient(api_key, session=session)
-        
+
         if db_provider not in ('mongodb', 'oracle'):
             raise ValueError("Supported database providers are 'mongodb' and 'oracle'.")
-        
+
         self.db_provider = db_provider
         self.collection = collection
         self.index = index
@@ -146,10 +180,15 @@ class TavilyHybridClient():
             self.table_name = _validate_oracle_identifier(table_name, "table_name")
             self.embeddings_field = _validate_oracle_identifier(embeddings_field, "embeddings_field")
             self.content_field = _validate_oracle_identifier(content_field, "content_field")
-        
+
         self.embedding_function = _cohere_embed if embedding_function is None else embedding_function
         self.ranking_function = _cohere_rerank if ranking_function is None else ranking_function
-        
+
+        if not callable(self.embedding_function):
+            raise TypeError("embedding_function must be callable.")
+        if not callable(self.ranking_function):
+            raise TypeError("ranking_function must be callable.")
+
         if db_provider == 'mongodb':
             _validate_index(self)
 
@@ -158,7 +197,7 @@ class TavilyHybridClient():
         '''
         Return results for the given query from both the tavily API (foreign) and
         the configured database provider (local).
-        
+
         Parameters:
         query (str): The query to search for.
         max_results (int): The maximum number of results to return.
@@ -170,7 +209,7 @@ class TavilyHybridClient():
 
         if max_local is None:
             max_local = max_results
-        
+
         if max_foreign is None:
             max_foreign = max_results
 
@@ -219,9 +258,9 @@ class TavilyHybridClient():
             }
             for result in foreign_results
         ]
-        
+
         combined_results = local_results + projected_foreign_results
-        
+
         if len(combined_results) == 0:
             return []
 
@@ -237,9 +276,9 @@ class TavilyHybridClient():
             embeddings = self.embedding_function([result['content'] for result in foreign_results], 'search_document')
             for i, result in enumerate(foreign_results):
                 result['embeddings'] = embeddings[i]
-                
+
                 if save_foreign == True:
-                    # No custom function provided, save as is
+                    # No custom function provided, save the searchable fields.
                     documents.append({
                         self.content_field: result['content'],
                         self.embeddings_field: result['embeddings']
@@ -249,7 +288,10 @@ class TavilyHybridClient():
                     result = save_foreign(result)
                     if result:
                         documents.append(result)
-            
+
+            if not documents:
+                return combined_results
+
             if self.db_provider == 'mongodb':
                 # Add all in one call to make the operation atomic
                 self.collection.insert_many(documents)
