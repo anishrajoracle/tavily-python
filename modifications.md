@@ -1,26 +1,26 @@
-# Modifications: MongoDB and OracleDB Support in `TavilyHybridClient`
+# Modifications: OracleDB and MongoDB Support in `TavilyHybridClient`
 
 ## Goal
 
 Make `TavilyHybridClient` support two first-class local database providers:
 
 ```python
-db_provider="mongodb"
 db_provider="oracle"
+db_provider="mongodb"
 ```
 
 The change is scoped to loosening the provider coupling in `tavily/hybrid_rag/hybrid_rag.py`. It does not introduce a separate package, wrapper, or cache product. Both providers live in the main hybrid RAG client.
 
 ## Design Principle
 
-MongoDB and OracleDB are treated as peer database providers.
+OracleDB and MongoDB are treated as peer database providers, with OracleDB listed first in the public examples and provider branches.
 
 The code now uses explicit provider branches:
 
 ```python
-if self.db_provider == "mongodb":
+if self.db_provider == "oracle":
     ...
-elif self.db_provider == "oracle":
+elif self.db_provider == "mongodb":
     ...
 else:
     raise ValueError(...)
@@ -35,20 +35,7 @@ This avoids making either provider look like the default and the other one look 
 The constructor now accepts:
 
 ```python
-db_provider: Literal["mongodb", "oracle"]
-```
-
-MongoDB arguments:
-
-```python
-TavilyHybridClient(
-    api_key="...",
-    db_provider="mongodb",
-    collection=mongo_collection,
-    index="vector_search",
-    embeddings_field="embeddings",
-    content_field="content",
-)
+db_provider: Literal["oracle", "mongodb"]
 ```
 
 OracleDB arguments:
@@ -64,16 +51,20 @@ TavilyHybridClient(
 )
 ```
 
-### Local Search
-
-MongoDB local search continues to use the existing Atlas Vector Search aggregation:
+MongoDB arguments:
 
 ```python
-collection.aggregate([
-    {"$vectorSearch": ...},
-    {"$project": ...},
-])
+TavilyHybridClient(
+    api_key="...",
+    db_provider="mongodb",
+    collection=mongo_collection,
+    index="vector_search",
+    embeddings_field="embeddings",
+    content_field="content",
+)
 ```
+
+### Local Search
 
 OracleDB local search uses Oracle Database 23ai vector search:
 
@@ -87,18 +78,27 @@ The Oracle-specific search implementation is isolated in:
 _search_oracle(...)
 ```
 
-### Saving Foreign Results
-
-MongoDB saving continues to use:
+MongoDB local search continues to use the existing Atlas Vector Search aggregation:
 
 ```python
-self.collection.insert_many(documents)
+collection.aggregate([
+    {"$vectorSearch": ...},
+    {"$project": ...},
+])
 ```
+
+### Saving Foreign Results
 
 OracleDB saving uses:
 
 ```python
 _insert_oracle_documents(...)
+```
+
+MongoDB saving continues to use:
+
+```python
+self.collection.insert_many(documents)
 ```
 
 Oracle vector values are converted to:
@@ -202,4 +202,4 @@ Any additional keys returned by a custom `save_foreign` function must correspond
 
 ## Non-Goals
 
-This change does not create a wrapper package or a separate Oracle-only product. The point is to support MongoDB and OracleDB inside the existing hybrid RAG client as two first-class database provider choices.
+This change does not create a wrapper package or a separate Oracle-only product. The point is to support OracleDB and MongoDB inside the existing hybrid RAG client as two first-class database provider choices.
