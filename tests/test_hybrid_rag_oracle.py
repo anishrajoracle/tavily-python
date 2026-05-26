@@ -36,6 +36,18 @@ class FakeConnection:
         self.committed = True
 
 
+class FakeTavilyClient:
+    def search(self, *_args, **_kwargs):
+        return {
+            "results": [
+                {
+                    "content": "foreign oracle content",
+                    "score": 0.91,
+                }
+            ]
+        }
+
+
 def test_oracle_search_uses_vector_distance_without_touching_mongodb_collection():
     connection = FakeConnection()
     client = TavilyHybridClient(
@@ -87,6 +99,42 @@ def test_oracle_insert_converts_embeddings_to_vector_bind():
     assert rows[0]["SITE_URL"] == "https://example.com"
     assert rows[0]["EMBEDDINGS"].typecode == "f"
     assert list(rows[0]["EMBEDDINGS"]) == pytest.approx([0.4, 0.5, 0.6])
+    assert connection.committed is True
+
+
+def test_oracle_save_foreign_inserts_tavily_results():
+    connection = FakeConnection()
+    client = TavilyHybridClient(
+        api_key="tvly-test",
+        db_provider="oracle",
+        connection=connection,
+        table_name="tavily_documents",
+        embedding_function=lambda texts, _: [[0.7, 0.8, 0.9] for _ in texts],
+        ranking_function=lambda _, documents, __: documents,
+    )
+    client.tavily = FakeTavilyClient()
+
+    results = client.search(
+        "test query",
+        max_results=2,
+        max_local=1,
+        max_foreign=1,
+        save_foreign=True,
+    )
+
+    sql, rows = connection.cursor_instance.executemany_call
+    assert results == [
+        {"content": "local content", "score": 0.75, "origin": "local"},
+        {"content": "foreign oracle content", "score": 0.91, "origin": "foreign"},
+    ]
+    assert sql == (
+        "INSERT INTO TAVILY_DOCUMENTS "
+        "(CONTENT, EMBEDDINGS) "
+        "VALUES (:CONTENT, :EMBEDDINGS)"
+    )
+    assert rows[0]["CONTENT"] == "foreign oracle content"
+    assert rows[0]["EMBEDDINGS"].typecode == "f"
+    assert list(rows[0]["EMBEDDINGS"]) == pytest.approx([0.7, 0.8, 0.9])
     assert connection.committed is True
 
 
