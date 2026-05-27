@@ -246,6 +246,47 @@ for chunk in stream:
     print(chunk.decode('utf-8'))
 ```
 
+# Tavily Hybrid RAG
+
+`TavilyHybridClient` can use MongoDB or OracleDB as a local vector store. MongoDB keeps the existing hybrid-search behavior only.
+
+OracleDB supports two retrieval modes:
+
+- `retrieval_mode="hybrid_search"`: search Oracle first, search Tavily when `max_foreign > 0`, merge and rerank local plus foreign results, and optionally persist Tavily results with `save_foreign=True`.
+- `retrieval_mode="freshness_cache"`: Oracle-only. Search fresh Oracle rows first, return Oracle results when at least one row meets `cache_score_threshold`, and skip Tavily on that cache hit. On a cache miss, call Tavily, optionally persist Tavily results into Oracle, and return Tavily results.
+
+Freshness-cache mode expects Oracle rows to have an `ADDED_AT` timestamp column, for example `ADDED_AT TIMESTAMP DEFAULT SYSTIMESTAMP`, so the client can apply `cache_ttl_seconds`.
+
+```python
+from tavily import TavilyHybridClient
+
+hybrid_client = TavilyHybridClient(
+    api_key="tvly-YOUR_API_KEY",
+    db_provider="oracle",
+    connection=oracle_connection,
+    table_name="TAVILY_DOCUMENTS",
+    retrieval_mode="hybrid_search",
+)
+
+freshness_client = TavilyHybridClient(
+    api_key="tvly-YOUR_API_KEY",
+    db_provider="oracle",
+    connection=oracle_connection,
+    table_name="TAVILY_DOCUMENTS",
+    retrieval_mode="freshness_cache",
+    cache_ttl_seconds=3600,
+    cache_score_threshold=0.75,
+)
+
+results = freshness_client.search(
+    "latest Oracle Database vector search features",
+    max_results=5,
+    max_local=5,
+    max_foreign=5,
+    save_foreign=True,
+)
+```
+
 ## Advanced: Custom Session / Client Injection
 
 For enterprise environments that proxy Tavily traffic through an API gateway (e.g., for centralized auth, logging, or policy enforcement), you can pass a pre-configured HTTP session instead of a Tavily API key.

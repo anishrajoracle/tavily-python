@@ -76,3 +76,16 @@ def test_embedding_and_ranking_functions_must_be_callable():
             embedding_function="not-callable",
             ranking_function=lambda _, documents, __: documents,
         )
+
+
+def test_mongodb_rejects_freshness_cache_mode():
+    with pytest.raises(ValueError, match="freshness_cache.*db_provider='oracle'"):
+        TavilyHybridClient(
+            api_key="tvly-test",
+            db_provider="mongodb",
+            collection=FakeMongoCollection(),
+            index="vector_search",
+            retrieval_mode="freshness_cache",
+            embedding_function=lambda texts, _: [[0.1, 0.2, 0.3] for _ in texts],
+            ranking_function=lambda _, documents, __: documents,
+        )

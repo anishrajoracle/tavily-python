@@ -10,9 +10,10 @@ Compared with upstream `tavily-ai/tavily-python`, the following files were added
 
 | File | Change type | Purpose |
 | --- | --- | --- |
-| `tavily/hybrid_rag/hybrid_rag.py` | Modified | Added OracleDB support, provider branching, Oracle search/insert helpers, safer Cohere setup, and guardrails. |
+| `tavily/hybrid_rag/hybrid_rag.py` | Modified | Added OracleDB support, provider branching, Oracle search/insert helpers, Oracle retrieval modes, safer Cohere setup, and guardrails. |
 | `setup.py` | Modified | Added optional database extras for OracleDB and MongoDB. |
 | `examples/hybrid_rag_oracle.py` | Added | Added a runnable OracleDB example. |
+| `examples/hybrid_rag_oracle_modes.py` | Added | Shows Oracle `hybrid_search` and `freshness_cache` configuration side by side. |
 | `examples/hybrid_rag_oracle_smoke_test.py` | Added | Added a repeatable manual OracleDB + Tavily smoke test script. |
 | `tests/test_hybrid_rag_oracle.py` | Added | Added OracleDB-specific unit tests. |
 | `tests/test_hybrid_rag_safety.py` | Added | Added safety/regression tests around hybrid RAG behavior. |
@@ -52,6 +53,43 @@ else:
 
 This keeps the existing MongoDB flow easy to review while still treating OracleDB as a supported provider inside the same client.
 
+### Oracle Retrieval Modes
+
+OracleDB now supports two modes:
+
+```python
+retrieval_mode="hybrid_search"
+retrieval_mode="freshness_cache"
+```
+
+`hybrid_search` is the default and preserves the existing Oracle behavior:
+
+```text
+query
+-> embed query
+-> search Oracle local vector store
+-> search Tavily when max_foreign > 0
+-> combine local + foreign
+-> rerank
+-> optionally save Tavily results into Oracle
+```
+
+`freshness_cache` is Oracle-only and implements the freshness-layer flow:
+
+```text
+query
+-> embed query
+-> search fresh Oracle rows
+-> if a local result meets cache_score_threshold:
+     return Oracle results only
+   else:
+     call Tavily
+     optionally save Tavily results into Oracle
+     return Tavily results only
+```
+
+MongoDB continues to support only `hybrid_search`. Passing `retrieval_mode="freshness_cache"` with `db_provider="mongodb"` raises a clean unsupported-mode error.
+
 ### Constructor Changes
 
 The constructor now accepts both OracleDB and MongoDB configuration:
@@ -62,6 +100,9 @@ collection=None
 index: Optional[str] = None
 connection=None
 table_name: Optional[str] = None
+retrieval_mode: Literal["hybrid_search", "freshness_cache"] = "hybrid_search"
+cache_ttl_seconds: int = 86400
+cache_score_threshold: float = 0.0
 ```
 
 MongoDB path:
@@ -87,6 +128,23 @@ TavilyHybridClient(
     table_name="TAVILY_DOCUMENTS",
     embeddings_field="EMBEDDINGS",
     content_field="CONTENT",
+    retrieval_mode="hybrid_search",
+)
+```
+
+OracleDB freshness-cache path:
+
+```python
+TavilyHybridClient(
+    api_key="...",
+    db_provider="oracle",
+    connection=oracle_connection,
+    table_name="TAVILY_DOCUMENTS",
+    embeddings_field="EMBEDDINGS",
+    content_field="CONTENT",
+    retrieval_mode="freshness_cache",
+    cache_ttl_seconds=3600,
+    cache_score_threshold=0.75,
 )
 ```
 
@@ -126,6 +184,14 @@ The result shape is kept compatible with the existing hybrid RAG flow:
     "origin": "local",
 }
 ```
+
+In `freshness_cache` mode, Oracle local search adds a TTL predicate against `ADDED_AT`:
+
+```sql
+ADDED_AT >= CAST(SYSTIMESTAMP AS TIMESTAMP) - NUMTODSINTERVAL(:cache_ttl_seconds, 'SECOND')
+```
+
+Rows returned by this query must also meet `cache_score_threshold` before Tavily is skipped.
 
 ### Saving Tavily Results
 
@@ -225,6 +291,7 @@ Files added:
 
 ```text
 examples/hybrid_rag_oracle.py
+examples/hybrid_rag_oracle_modes.py
 examples/hybrid_rag_oracle_smoke_test.py
 ```
 
@@ -234,6 +301,13 @@ examples/hybrid_rag_oracle_smoke_test.py
 - Optionally use `ORACLE_SYSDBA`.
 - Instantiate `TavilyHybridClient` with `db_provider="oracle"`.
 - Point the client at an Oracle table containing content and vector embeddings.
+
+`examples/hybrid_rag_oracle_modes.py` shows how to configure:
+
+- Oracle `hybrid_search`
+- Oracle `freshness_cache`
+- `cache_ttl_seconds`
+- `cache_score_threshold`
 
 `examples/hybrid_rag_oracle_smoke_test.py` is a repeatable manual smoke test. It:
 
@@ -274,6 +348,8 @@ Coverage added:
 - Oracle insert builds the expected `INSERT INTO ... VALUES ...` statement.
 - Oracle insert converts embeddings into vector binds.
 - Oracle `save_foreign=True` inserts Tavily foreign results through the Oracle path.
+- Oracle `freshness_cache` skips Tavily on a fresh, high-scoring local hit.
+- Oracle `freshness_cache` calls Tavily and saves foreign results on a cache miss.
 - Unsafe Oracle identifiers are rejected.
 
 ### New Safety Tests
@@ -289,6 +365,7 @@ Coverage added:
 - If a custom `save_foreign` function filters out every document, no empty insert is attempted.
 - `embedding_function` must be callable.
 - `ranking_function` must be callable.
+- MongoDB rejects Oracle-only `freshness_cache` mode.
 
 ### Existing Error Test Fix
 
@@ -318,7 +395,7 @@ Full test suite:
 Result:
 
 ```text
-80 passed in 0.49s
+83 passed in 0.40s
 ```
 
 Targeted tests:
@@ -330,7 +407,7 @@ Targeted tests:
 Result:
 
 ```text
-9 passed in 0.06s
+12 passed in 0.04s
 ```
 
 Manual OracleDB integration testing was also completed against a local Oracle container. The Oracle path successfully:
@@ -371,6 +448,8 @@ EMBEDDINGS
 ```
 
 Any extra keys returned by a custom `save_foreign` function must map to real Oracle table columns.
+
+`freshness_cache` mode uses `ADDED_AT` for TTL validation. The default Oracle `save_foreign=True` path can rely on the table default to populate it.
 
 ## Non-Goals
 

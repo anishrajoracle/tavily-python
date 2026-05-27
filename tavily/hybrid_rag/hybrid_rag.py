@@ -13,6 +13,8 @@ except ImportError:
 co = None
 
 _ORACLE_IDENTIFIER = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+_ORACLE_CACHE_TIMESTAMP_FIELD = "ADDED_AT"
+_RETRIEVAL_MODES = ("hybrid_search", "freshness_cache")
 
 
 def _validate_oracle_identifier(value, name):
@@ -135,7 +137,10 @@ class TavilyHybridClient():
             table_name: Optional[str] = None,
             embedding_function: Optional[Callable[[Sequence[str], str], Sequence[Sequence[float]]]] = None,
             ranking_function: Optional[Callable[[str, list, int], list]] = None,
-            session: Optional[requests.Session] = None
+            session: Optional[requests.Session] = None,
+            retrieval_mode: Literal['hybrid_search', 'freshness_cache'] = 'hybrid_search',
+            cache_ttl_seconds: int = 86400,
+            cache_score_threshold: float = 0.0
         ):
         '''
         A client for performing hybrid RAG using both the Tavily API and a local database.
@@ -152,13 +157,36 @@ class TavilyHybridClient():
         embedding_function (callable): If provided, this function will be used to generate embeddings for the search query and documents.
         ranking_function (callable): If provided, this function will be used to rerank the combined results.
         session (requests.Session): If provided, this pre-configured session will be used for HTTP requests. When set, api_key is optional.
+        retrieval_mode (str): Retrieval mode. 'hybrid_search' is supported for MongoDB and Oracle. 'freshness_cache' is Oracle-only.
+        cache_ttl_seconds (int): Freshness window used by Oracle freshness_cache mode.
+        cache_score_threshold (float): Minimum local score needed for an Oracle freshness_cache hit.
         '''
 
         self.tavily = TavilyClient(api_key, session=session)
 
         if db_provider not in ('mongodb', 'oracle'):
             raise ValueError("Supported database providers are 'mongodb' and 'oracle'.")
+        if retrieval_mode not in _RETRIEVAL_MODES:
+            raise ValueError(
+                "Supported retrieval modes are 'hybrid_search' and 'freshness_cache'."
+            )
+        if db_provider != 'oracle' and retrieval_mode == 'freshness_cache':
+            raise ValueError(
+                "retrieval_mode='freshness_cache' is only supported when "
+                "db_provider='oracle'."
+            )
+        if retrieval_mode == 'freshness_cache':
+            if cache_ttl_seconds <= 0:
+                raise ValueError("cache_ttl_seconds must be greater than 0.")
+            try:
+                cache_score_threshold = float(cache_score_threshold)
+            except (TypeError, ValueError) as exc:
+                raise ValueError("cache_score_threshold must be a number.") from exc
+
         self.db_provider = db_provider
+        self.retrieval_mode = retrieval_mode
+        self.cache_ttl_seconds = cache_ttl_seconds
+        self.cache_score_threshold = cache_score_threshold
         self.collection = collection
         self.index = index
         self.connection = connection
@@ -241,25 +269,24 @@ class TavilyHybridClient():
                 }
             ]))
         elif self.db_provider == 'oracle':
+            if self.retrieval_mode == 'freshness_cache':
+                return self._search_oracle_freshness_cache(
+                    query,
+                    query_embeddings,
+                    max_results,
+                    max_local,
+                    max_foreign,
+                    save_foreign,
+                    **kwargs
+                )
             local_results = self._search_oracle(query_embeddings, max_local)
         else:
             raise ValueError(f"Unsupported database provider: {self.db_provider}")
 
-        # Search using tavily
-        if max_foreign > 0:
-            foreign_results = self.tavily.search(query, max_results=max_foreign, **kwargs)['results']
-        else:
-            foreign_results = []
+        foreign_results = self._search_tavily(query, max_foreign, **kwargs)
 
         # Combine the results
-        projected_foreign_results = [
-            {
-                'content': result['content'],
-                'score': result['score'],
-                'origin': 'foreign'
-            }
-            for result in foreign_results
-        ]
+        projected_foreign_results = self._project_foreign_results(foreign_results)
 
         combined_results = local_results + projected_foreign_results
 
@@ -272,42 +299,98 @@ class TavilyHybridClient():
         if len(combined_results) > max_results:
             combined_results = combined_results[:max_results]
 
-        # Can't use 'not save_foreign' because save_foreign is not necessarily a boolean
-        if max_foreign > 0 and save_foreign != False:
-            documents = []
-            embeddings = self.embedding_function([result['content'] for result in foreign_results], 'search_document')
-            for i, result in enumerate(foreign_results):
-                result['embeddings'] = embeddings[i]
-
-                if save_foreign == True:
-                    # No custom function provided, save the searchable fields.
-                    documents.append({
-                        self.content_field: result['content'],
-                        self.embeddings_field: result['embeddings']
-                    })
-                else:
-                    # save_foreign is a custom function
-                    result = save_foreign(result)
-                    if result:
-                        documents.append(result)
-
-            if not documents:
-                return combined_results
-
-            if self.db_provider == 'mongodb':
-                # Add all in one call to make the operation atomic
-                self.collection.insert_many(documents)
-            elif self.db_provider == 'oracle':
-                self._insert_oracle_documents(documents)
-            else:
-                raise ValueError(f"Unsupported database provider: {self.db_provider}")
+        self._save_foreign_results(foreign_results, save_foreign, max_foreign)
 
         return combined_results
 
-    def _search_oracle(self, query_embeddings, max_local):
+    def _search_tavily(self, query, max_foreign, **kwargs):
+        if max_foreign > 0:
+            return self.tavily.search(query, max_results=max_foreign, **kwargs)['results']
+        return []
+
+    def _project_foreign_results(self, foreign_results):
+        return [
+            {
+                'content': result['content'],
+                'score': result['score'],
+                'origin': 'foreign'
+            }
+            for result in foreign_results
+        ]
+
+    def _save_foreign_results(self, foreign_results, save_foreign, max_foreign):
+        # Can't use 'not save_foreign' because save_foreign is not necessarily a boolean
+        if not (max_foreign > 0 and save_foreign != False):
+            return
+
+        documents = []
+        embeddings = self.embedding_function([result['content'] for result in foreign_results], 'search_document')
+        for i, result in enumerate(foreign_results):
+            result['embeddings'] = embeddings[i]
+
+            if save_foreign == True:
+                # No custom function provided, save the searchable fields.
+                documents.append({
+                    self.content_field: result['content'],
+                    self.embeddings_field: result['embeddings']
+                })
+            else:
+                # save_foreign is a custom function
+                result = save_foreign(result)
+                if result:
+                    documents.append(result)
+
+        if not documents:
+            return
+
+        if self.db_provider == 'mongodb':
+            # Add all in one call to make the operation atomic
+            self.collection.insert_many(documents)
+        elif self.db_provider == 'oracle':
+            self._insert_oracle_documents(documents)
+        else:
+            raise ValueError(f"Unsupported database provider: {self.db_provider}")
+
+    def _search_oracle_freshness_cache(self, query, query_embeddings, max_results,
+                                       max_local, max_foreign, save_foreign,
+                                       **kwargs):
+        local_results = self._search_oracle(
+            query_embeddings,
+            max_local,
+            cache_ttl_seconds=self.cache_ttl_seconds
+        )
+        cache_results = [
+            result
+            for result in local_results
+            if result['score'] >= self.cache_score_threshold
+        ]
+
+        if cache_results:
+            return cache_results[:max_results]
+
+        foreign_results = self._search_tavily(query, max_foreign, **kwargs)
+        results = self._project_foreign_results(foreign_results)
+
+        if len(results) == 0:
+            return []
+
+        self._save_foreign_results(foreign_results, save_foreign, max_foreign)
+        return results[:max_results]
+
+    def _search_oracle(self, query_embeddings, max_local, cache_ttl_seconds=None):
         limit = int(max_local)
         if limit < 1:
             return []
+
+        freshness_filter = ""
+        execute_kwargs = {"query_vector": _to_oracle_vector(query_embeddings)}
+        if cache_ttl_seconds is not None:
+            freshness_filter = (
+                f"AND {_ORACLE_CACHE_TIMESTAMP_FIELD} >= "
+                "CAST(SYSTIMESTAMP AS TIMESTAMP) - "
+                "NUMTODSINTERVAL(:cache_ttl_seconds, 'SECOND')"
+            )
+            execute_kwargs["cache_ttl_seconds"] = cache_ttl_seconds
 
         sql = f"""
             SELECT {self.content_field},
@@ -315,12 +398,13 @@ class TavilyHybridClient():
                    'local' AS origin
             FROM {self.table_name}
             WHERE {self.embeddings_field} IS NOT NULL
+              {freshness_filter}
             ORDER BY VECTOR_DISTANCE({self.embeddings_field}, :query_vector, COSINE)
             FETCH FIRST {limit} ROWS ONLY
         """
 
         with self.connection.cursor() as cursor:
-            cursor.execute(sql, query_vector=_to_oracle_vector(query_embeddings))
+            cursor.execute(sql, **execute_kwargs)
             return [
                 {
                     'content': _read_lob(row[0]),
