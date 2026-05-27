@@ -13,6 +13,7 @@ Compared with upstream `tavily-ai/tavily-python`, the following files were added
 | `tavily/hybrid_rag/hybrid_rag.py` | Modified | Added OracleDB support, provider branching, Oracle search/insert helpers, safer Cohere setup, and guardrails. |
 | `setup.py` | Modified | Added optional database extras for OracleDB and MongoDB. |
 | `examples/hybrid_rag_oracle.py` | Added | Added a runnable OracleDB example. |
+| `examples/hybrid_rag_oracle_smoke_test.py` | Added | Added a repeatable manual OracleDB + Tavily smoke test script. |
 | `tests/test_hybrid_rag_oracle.py` | Added | Added OracleDB-specific unit tests. |
 | `tests/test_hybrid_rag_safety.py` | Added | Added safety/regression tests around hybrid RAG behavior. |
 | `tests/test_errors.py` | Modified | Made invalid API key tests deterministic by mocking the `401` response instead of making a live network call. |
@@ -34,33 +35,46 @@ The original client was coupled to MongoDB-style behavior. It expected a MongoDB
 The client now supports:
 
 ```python
-db_provider="oracle"
 db_provider="mongodb"
+db_provider="oracle"
 ```
 
-OracleDB is intentionally listed first in provider options and branch ordering:
+For upstream merge friendliness, the existing MongoDB branch remains first and the OracleDB path is added as the additional provider branch:
 
 ```python
-if self.db_provider == "oracle":
+if self.db_provider == "mongodb":
     ...
-elif self.db_provider == "mongodb":
+elif self.db_provider == "oracle":
     ...
 else:
     raise ValueError(...)
 ```
 
-This presents OracleDB and MongoDB as peer database options rather than OracleDB looking like a secondary wrapper or separate product.
+This keeps the existing MongoDB flow easy to review while still treating OracleDB as a supported provider inside the same client.
 
 ### Constructor Changes
 
 The constructor now accepts both OracleDB and MongoDB configuration:
 
 ```python
-db_provider: Literal["oracle", "mongodb"]
+db_provider: Literal["mongodb", "oracle"]
 collection=None
 index: Optional[str] = None
 connection=None
 table_name: Optional[str] = None
+```
+
+MongoDB path:
+
+```python
+TavilyHybridClient(
+    api_key="...",
+    db_provider="mongodb",
+    collection=mongo_collection,
+    index="vector_search",
+    embeddings_field="embeddings",
+    content_field="content",
+)
 ```
 
 OracleDB path:
@@ -76,18 +90,18 @@ TavilyHybridClient(
 )
 ```
 
-MongoDB path:
+### MongoDB Local Search
+
+The MongoDB path remains in the main client and continues to use the existing Atlas Vector Search aggregation:
 
 ```python
-TavilyHybridClient(
-    api_key="...",
-    db_provider="mongodb",
-    collection=mongo_collection,
-    index="vector_search",
-    embeddings_field="embeddings",
-    content_field="content",
-)
+collection.aggregate([
+    {"$vectorSearch": ...},
+    {"$project": ...},
+])
 ```
+
+The MongoDB code remains the first provider branch so the original behavior is easier for upstream maintainers to compare.
 
 ### OracleDB Local Search
 
@@ -112,19 +126,6 @@ The result shape is kept compatible with the existing hybrid RAG flow:
     "origin": "local",
 }
 ```
-
-### MongoDB Local Search
-
-The MongoDB path remains in the main client and continues to use the existing Atlas Vector Search aggregation:
-
-```python
-collection.aggregate([
-    {"$vectorSearch": ...},
-    {"$project": ...},
-])
-```
-
-The MongoDB code is now inside the `elif db_provider == "mongodb"` branch so it is clearly separated from the OracleDB path.
 
 ### Saving Tavily Results
 
@@ -220,20 +221,41 @@ pip install -e ".[mongodb]"
 
 ## OracleDB Example
 
-File added:
+Files added:
 
 ```text
 examples/hybrid_rag_oracle.py
+examples/hybrid_rag_oracle_smoke_test.py
 ```
 
-The example shows how to:
+`examples/hybrid_rag_oracle.py` shows how to:
 
 - Create a `python-oracledb` connection.
 - Optionally use `ORACLE_SYSDBA`.
 - Instantiate `TavilyHybridClient` with `db_provider="oracle"`.
 - Point the client at an Oracle table containing content and vector embeddings.
 
+`examples/hybrid_rag_oracle_smoke_test.py` is a repeatable manual smoke test. It:
+
+- Reads `TAVILY_API_KEY` from the environment.
+- Connects to Oracle using environment-configurable connection settings.
+- Creates a small Oracle vector table if it does not already exist.
+- Seeds local Oracle rows if the table is empty.
+- Runs `TavilyHybridClient(db_provider="oracle")`.
+- Fetches Tavily foreign results.
+- Saves Tavily foreign results into Oracle with `save_foreign=True`.
+- Prints local/foreign results and the final Oracle row count.
+
 ## Test Changes
+
+High-level summary:
+
+- Oracle search SQL is generated correctly.
+- Oracle vector binds are formatted correctly.
+- Oracle inserts work structurally.
+- Tavily foreign results can be saved into Oracle.
+- Unsafe SQL identifiers are rejected.
+- Shared hybrid RAG edge cases do not break inserts.
 
 ### New OracleDB Tests
 

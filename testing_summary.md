@@ -128,6 +128,33 @@ What this verified:
 - The hybrid result path can combine Oracle local results and Tavily foreign results.
 - With `save_foreign=True`, the Tavily results are passed through the Oracle save path.
 
+## Repeatable Smoke Test Script
+
+A repo-level smoke test script was added so the manual Tavily + Oracle flow can be run without pasting a temporary heredoc into the terminal.
+
+File:
+
+```text
+examples/hybrid_rag_oracle_smoke_test.py
+```
+
+Run from your local `tavily-python` project directory:
+
+```bash
+export TAVILY_API_KEY="your-real-key"
+.venv/bin/python examples/hybrid_rag_oracle_smoke_test.py
+```
+
+The script:
+
+- Connects to Oracle.
+- Creates a small vector table if needed.
+- Seeds local Oracle rows if the table is empty.
+- Runs `TavilyHybridClient(db_provider="oracle")`.
+- Fetches Tavily foreign results.
+- Saves Tavily foreign results into Oracle with `save_foreign=True`.
+- Prints local/foreign results and `row_count`.
+
 ## Final Status
 
 | Area | Status |

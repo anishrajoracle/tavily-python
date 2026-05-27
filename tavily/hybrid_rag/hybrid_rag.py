@@ -126,7 +126,7 @@ class TavilyHybridClient():
     def __init__(
             self,
             api_key: Union[str, None],
-            db_provider: Literal['oracle', 'mongodb'],
+            db_provider: Literal['mongodb', 'oracle'],
             collection=None,
             index: Optional[str] = None,
             embeddings_field: str = 'embeddings',
@@ -142,13 +142,13 @@ class TavilyHybridClient():
 
         Parameters:
         api_key (str): The Tavily API key. If this is set to None, it will be loaded from the environment variable TAVILY_API_KEY.
-        db_provider (str): The database provider. Supported values are 'oracle' and 'mongodb'.
-        connection: A python-oracledb connection. Required when db_provider='oracle'.
-        table_name (str): The Oracle table that stores content and vector embeddings. Required when db_provider='oracle'.
+        db_provider (str): The database provider. Supported values are 'mongodb' and 'oracle'.
         collection: The MongoDB collection object that will be used for local search. Required when db_provider='mongodb'.
         index (str): The MongoDB collection's vector search index. Required when db_provider='mongodb'.
         embeddings_field (str): The name of the field in the database that contains the embeddings.
         content_field (str): The name of the field in the database that contains the content.
+        connection: A python-oracledb connection. Required when db_provider='oracle'.
+        table_name (str): The Oracle table that stores content and vector embeddings. Required when db_provider='oracle'.
         embedding_function (callable): If provided, this function will be used to generate embeddings for the search query and documents.
         ranking_function (callable): If provided, this function will be used to rerank the combined results.
         session (requests.Session): If provided, this pre-configured session will be used for HTTP requests. When set, api_key is optional.
@@ -156,15 +156,22 @@ class TavilyHybridClient():
 
         self.tavily = TavilyClient(api_key, session=session)
 
-        if db_provider not in ('oracle', 'mongodb'):
-            raise ValueError("Supported database providers are 'oracle' and 'mongodb'.")
+        if db_provider not in ('mongodb', 'oracle'):
+            raise ValueError("Supported database providers are 'mongodb' and 'oracle'.")
         self.db_provider = db_provider
         self.collection = collection
         self.index = index
         self.connection = connection
         self.table_name = table_name
 
-        if db_provider == 'oracle':
+        if db_provider == 'mongodb':
+            if collection is None:
+                raise ValueError("collection is required when db_provider='mongodb'.")
+            if index is None:
+                raise ValueError("index is required when db_provider='mongodb'.")
+            self.embeddings_field = embeddings_field
+            self.content_field = content_field
+        elif db_provider == 'oracle':
             if connection is None:
                 raise ValueError("connection is required when db_provider='oracle'.")
             if table_name is None:
@@ -172,13 +179,6 @@ class TavilyHybridClient():
             self.table_name = _validate_oracle_identifier(table_name, "table_name")
             self.embeddings_field = _validate_oracle_identifier(embeddings_field, "embeddings_field")
             self.content_field = _validate_oracle_identifier(content_field, "content_field")
-        elif db_provider == 'mongodb':
-            if collection is None:
-                raise ValueError("collection is required when db_provider='mongodb'.")
-            if index is None:
-                raise ValueError("index is required when db_provider='mongodb'.")
-            self.embeddings_field = embeddings_field
-            self.content_field = content_field
 
         self.embedding_function = _cohere_embed if embedding_function is None else embedding_function
         self.ranking_function = _cohere_rerank if ranking_function is None else ranking_function
@@ -188,11 +188,11 @@ class TavilyHybridClient():
         if not callable(self.ranking_function):
             raise TypeError("ranking_function must be callable.")
 
-        if db_provider == 'oracle':
+        if db_provider == 'mongodb':
+            _validate_index(self)
+        elif db_provider == 'oracle':
             # Oracle config is validated above when identifiers are normalized.
             pass
-        elif db_provider == 'mongodb':
-            _validate_index(self)
 
     def search(self, query, max_results=10, max_local=None, max_foreign=None,
                save_foreign=False, **kwargs):
@@ -217,9 +217,7 @@ class TavilyHybridClient():
 
         query_embeddings = self.embedding_function([query], 'search_query')[0]
 
-        if self.db_provider == 'oracle':
-            local_results = self._search_oracle(query_embeddings, max_local)
-        elif self.db_provider == 'mongodb':
+        if self.db_provider == 'mongodb':
             # Search the local collection
             local_results = list(self.collection.aggregate([
                 {
@@ -242,6 +240,8 @@ class TavilyHybridClient():
                     }
                 }
             ]))
+        elif self.db_provider == 'oracle':
+            local_results = self._search_oracle(query_embeddings, max_local)
         else:
             raise ValueError(f"Unsupported database provider: {self.db_provider}")
 
@@ -294,11 +294,11 @@ class TavilyHybridClient():
             if not documents:
                 return combined_results
 
-            if self.db_provider == 'oracle':
-                self._insert_oracle_documents(documents)
-            elif self.db_provider == 'mongodb':
+            if self.db_provider == 'mongodb':
                 # Add all in one call to make the operation atomic
                 self.collection.insert_many(documents)
+            elif self.db_provider == 'oracle':
+                self._insert_oracle_documents(documents)
             else:
                 raise ValueError(f"Unsupported database provider: {self.db_provider}")
 
