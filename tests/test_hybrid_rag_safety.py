@@ -6,6 +6,7 @@ from tavily import TavilyHybridClient
 class FakeMongoCollection:
     def __init__(self):
         self.insert_many_called = False
+        self.aggregate_called = False
 
     def list_search_indexes(self):
         return [
@@ -25,6 +26,7 @@ class FakeMongoCollection:
         ]
 
     def aggregate(self, _):
+        self.aggregate_called = True
         return []
 
     def insert_many(self, documents):
@@ -89,3 +91,25 @@ def test_mongodb_rejects_freshness_cache_mode():
             embedding_function=lambda texts, _: [[0.1, 0.2, 0.3] for _ in texts],
             ranking_function=lambda _, documents, __: documents,
         )
+
+
+def test_mongodb_ignores_oracle_only_feature_flags_in_hybrid_mode():
+    collection = FakeMongoCollection()
+    client = TavilyHybridClient(
+        api_key="tvly-test",
+        db_provider="mongodb",
+        collection=collection,
+        index="vector_search",
+        enable_native_hybrid_search=True,
+        enable_oracle_json_payload=True,
+        enable_provenance_metadata=True,
+        dedup_similarity_threshold=0.95,
+        embedding_function=lambda texts, _: [[0.1, 0.2, 0.3] for _ in texts],
+        ranking_function=lambda _, documents, __: documents,
+    )
+
+    results = client.search("test query", max_local=1, max_foreign=0)
+
+    assert results == []
+    assert collection.aggregate_called is True
+    assert collection.insert_many_called is False

@@ -4,11 +4,12 @@ from tavily import TavilyHybridClient
 
 
 class FakeCursor:
-    def __init__(self, rows=None):
+    def __init__(self, rows=None, fetchone_results=None):
         self.executed = None
         self.executed_calls = []
         self.executemany_call = None
         self.rows = rows
+        self.fetchone_results = fetchone_results or []
 
         if self.rows is None:
             self.rows = [("local content", 0.75, "local")]
@@ -29,10 +30,18 @@ class FakeCursor:
     def fetchall(self):
         return self.rows
 
+    def fetchone(self):
+        if self.fetchone_results:
+            return self.fetchone_results.pop(0)
+        return None
+
 
 class FakeConnection:
-    def __init__(self, rows=None):
-        self.cursor_instance = FakeCursor(rows=rows)
+    def __init__(self, rows=None, fetchone_results=None):
+        self.cursor_instance = FakeCursor(
+            rows=rows,
+            fetchone_results=fetchone_results,
+        )
         self.committed = False
 
     def cursor(self):
@@ -53,6 +62,8 @@ class FakeTavilyClient:
                 {
                     "content": "foreign oracle content",
                     "score": 0.91,
+                    "url": "https://example.com/oracle",
+                    "title": "Oracle example",
                 }
             ]
         }
@@ -87,6 +98,33 @@ def test_oracle_search_uses_vector_distance_without_touching_mongodb_collection(
     assert kwargs["query_vector"].typecode == "f"
     assert list(kwargs["query_vector"]) == pytest.approx([0.1, 0.2, 0.3])
     assert results == [{"content": "local content", "score": 0.75, "origin": "local"}]
+    assert "CONTAINS" not in sql
+
+
+def test_oracle_native_hybrid_search_uses_oracle_text_and_metadata_filters():
+    connection = FakeConnection()
+    client = TavilyHybridClient(
+        api_key="tvly-test",
+        db_provider="oracle",
+        connection=connection,
+        table_name="tavily_documents",
+        enable_native_hybrid_search=True,
+        oracle_metadata_filters={"provider_name": "tavily"},
+        embedding_function=lambda texts, _: [[0.1, 0.2, 0.3]],
+        ranking_function=lambda _, documents, __: documents,
+    )
+
+    client.search("test query", max_local=1, max_foreign=0)
+
+    sql, kwargs = connection.cursor_instance.executed
+    assert "CONTAINS(CONTENT, :text_query, 1) > 0" in sql
+    assert "SCORE(1) / 100 AS text_score" in sql
+    assert "WITH vector_candidates AS" in sql
+    assert "UNION ALL" in sql
+    assert "VECTOR_DISTANCE(EMBEDDINGS, :query_vector, COSINE)" in sql
+    assert "PROVIDER_NAME = :metadata_filter_0" in sql
+    assert kwargs["text_query"] == "test query"
+    assert kwargs["metadata_filter_0"] == "tavily"
 
 
 def test_oracle_insert_converts_embeddings_to_vector_bind():
@@ -119,6 +157,43 @@ def test_oracle_insert_converts_embeddings_to_vector_bind():
     assert rows[0]["EMBEDDINGS"].typecode == "f"
     assert list(rows[0]["EMBEDDINGS"]) == pytest.approx([0.4, 0.5, 0.6])
     assert connection.committed is True
+
+
+def test_oracle_save_foreign_can_store_json_payload_and_provenance_metadata():
+    connection = FakeConnection()
+    client = TavilyHybridClient(
+        api_key="tvly-test",
+        db_provider="oracle",
+        connection=connection,
+        table_name="tavily_documents",
+        enable_oracle_json_payload=True,
+        enable_provenance_metadata=True,
+        embedding_function=lambda texts, _: [[0.7, 0.8, 0.9] for _ in texts],
+        ranking_function=lambda _, documents, __: documents,
+    )
+    client.tavily = FakeTavilyClient()
+
+    client.search(
+        "test query",
+        max_local=0,
+        max_foreign=1,
+        save_foreign=True,
+    )
+
+    sql, rows = connection.cursor_instance.executemany_call
+    row = rows[0]
+    raw_payload = row["RAW_PAYLOAD"]
+    assert "RAW_PAYLOAD" in sql
+    assert row["SOURCE_URL"] == "https://example.com/oracle"
+    assert row["SOURCE_TITLE"] == "Oracle example"
+    assert row["RETRIEVAL_QUERY"] == "test query"
+    assert row["RETRIEVAL_MODE"] == "hybrid_search"
+    assert row["CACHE_HIT"] == 0
+    assert row["INSERTED_FROM"] == "tavily"
+    assert row["PROVIDER_NAME"] == "tavily"
+    assert raw_payload
+    assert '"provider_name": "tavily"' in raw_payload
+    assert '"url": "https://example.com/oracle"' in raw_payload
 
 
 def test_oracle_freshness_cache_hit_skips_tavily_and_returns_local_results():
@@ -228,6 +303,85 @@ def test_oracle_save_foreign_inserts_tavily_results():
     assert rows[0]["EMBEDDINGS"].typecode == "f"
     assert list(rows[0]["EMBEDDINGS"]) == pytest.approx([0.7, 0.8, 0.9])
     assert connection.committed is True
+
+
+def test_oracle_vector_index_helper_creates_index_when_missing():
+    connection = FakeConnection(fetchone_results=[(0,)])
+    client = TavilyHybridClient(
+        api_key="tvly-test",
+        db_provider="oracle",
+        connection=connection,
+        table_name="tavily_documents",
+        vector_index_name="tavily_docs_vec_idx",
+        vector_index_type="HNSW",
+        vector_index_distance="COSINE",
+        vector_index_neighbors=32,
+        vector_index_efconstruction=200,
+        embedding_function=lambda texts, _: [[0.1, 0.2, 0.3]],
+        ranking_function=lambda _, documents, __: documents,
+    )
+
+    created = client.ensure_oracle_vector_index()
+
+    assert created is True
+    assert connection.committed is True
+    _, create_kwargs = connection.cursor_instance.executed_calls[-1]
+    assert "DBMS_VECTOR.CREATE_INDEX" in connection.cursor_instance.executed_calls[-1][0]
+    assert create_kwargs["index_name"] == "TAVILY_DOCS_VEC_IDX"
+    assert create_kwargs["table_name"] == "TAVILY_DOCUMENTS"
+    assert create_kwargs["idx_vector_col"] == "EMBEDDINGS"
+    assert create_kwargs["idx_organization"] == "INMEMORY NEIGHBOR GRAPH"
+    assert create_kwargs["idx_distance_metric"] == "COSINE"
+    assert '"type": "HNSW"' in create_kwargs["idx_parameters"]
+    assert '"neighbors": 32' in create_kwargs["idx_parameters"]
+    assert '"efConstruction": 200' in create_kwargs["idx_parameters"]
+
+
+def test_oracle_vector_index_helper_skips_existing_index():
+    connection = FakeConnection(fetchone_results=[(1,)])
+    client = TavilyHybridClient(
+        api_key="tvly-test",
+        db_provider="oracle",
+        connection=connection,
+        table_name="tavily_documents",
+        vector_index_name="tavily_docs_vec_idx",
+        embedding_function=lambda texts, _: [[0.1, 0.2, 0.3]],
+        ranking_function=lambda _, documents, __: documents,
+    )
+
+    created = client.ensure_oracle_vector_index()
+
+    assert created is False
+    assert connection.committed is False
+    assert len(connection.cursor_instance.executed_calls) == 1
+
+
+def test_oracle_semantic_dedup_skips_near_duplicate_foreign_insert():
+    connection = FakeConnection(rows=[], fetchone_results=[(0.99,)])
+    client = TavilyHybridClient(
+        api_key="tvly-test",
+        db_provider="oracle",
+        connection=connection,
+        table_name="tavily_documents",
+        dedup_similarity_threshold=0.95,
+        embedding_function=lambda texts, _: [[0.7, 0.8, 0.9] for _ in texts],
+        ranking_function=lambda _, documents, __: documents,
+    )
+    client.tavily = FakeTavilyClient()
+
+    results = client.search(
+        "test query",
+        max_local=0,
+        max_foreign=1,
+        save_foreign=True,
+    )
+
+    assert results == [
+        {"content": "foreign oracle content", "score": 0.91, "origin": "foreign"}
+    ]
+    assert connection.cursor_instance.executemany_call is None
+    assert connection.committed is False
+    assert "FETCH FIRST 1 ROWS ONLY" in connection.cursor_instance.executed_calls[-1][0]
 
 
 def test_oracle_rejects_unsafe_identifiers():

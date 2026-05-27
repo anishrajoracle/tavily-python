@@ -23,7 +23,7 @@ Command:
 Result:
 
 ```text
-12 passed in 0.04s
+18 passed in 0.04s
 ```
 
 Summary:
@@ -31,9 +31,9 @@ Summary:
 | Test group | Passed | Failed | Notes |
 | --- | ---: | ---: | --- |
 | Error handling tests | 3 | 0 | Verified missing-key and invalid-key behavior without depending on a live network call. |
-| Oracle hybrid RAG tests | 6 | 0 | Verified Oracle search SQL, Oracle insert behavior, Oracle `save_foreign=True`, Oracle freshness-cache behavior, and Oracle identifier validation. |
-| Hybrid RAG safety tests | 3 | 0 | Verified empty save handling, callable validation, and MongoDB unsupported-mode handling. |
-| Total | 12 | 0 | All targeted error, Oracle, and safety tests passed. |
+| Oracle hybrid RAG tests | 11 | 0 | Verified Oracle search SQL, native hybrid SQL, JSON/provenance persistence, Oracle insert behavior, Oracle `save_foreign=True`, Oracle freshness-cache behavior, vector index setup, semantic dedup, and Oracle identifier validation. |
+| Hybrid RAG safety tests | 4 | 0 | Verified empty save handling, callable validation, MongoDB unsupported-mode handling, and MongoDB ignoring Oracle-only feature flags in hybrid mode. |
+| Total | 18 | 0 | All targeted error, Oracle, and safety tests passed. |
 
 ## Full Test Suite
 
@@ -46,14 +46,14 @@ Command:
 Result:
 
 ```text
-83 passed in 0.40s
+89 passed in 0.39s
 ```
 
 Summary:
 
 | Test suite | Passed | Failed |
 | --- | ---: | ---: |
-| Full pytest suite | 83 | 0 |
+| Full pytest suite | 89 | 0 |
 
 ## Previously Failing Test
 
@@ -162,5 +162,5 @@ The script:
 | Targeted Oracle/safety unit tests | Passed |
 | Manual Oracle integration test | Passed |
 | Manual Tavily + Oracle hybrid test | Passed |
-| Full pytest suite | 83 passed, 0 failed |
+| Full pytest suite | 89 passed, 0 failed |
 | Previous full-suite failure | Fixed by replacing live invalid-key request with an intercepted `401` response |

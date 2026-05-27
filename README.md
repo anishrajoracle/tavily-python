@@ -287,6 +287,71 @@ results = freshness_client.search(
 )
 ```
 
+Oracle AI Database features are opt-in and Oracle-only:
+
+```python
+oracle_client = TavilyHybridClient(
+    api_key="tvly-YOUR_API_KEY",
+    db_provider="oracle",
+    connection=oracle_connection,
+    table_name="TAVILY_DOCUMENTS",
+    enable_native_hybrid_search=True,
+    oracle_metadata_filters={"provider_name": "tavily"},
+    enable_oracle_json_payload=True,
+    enable_provenance_metadata=True,
+    dedup_similarity_threshold=0.95,
+)
+```
+
+`enable_native_hybrid_search=True` adds Oracle Text scoring to the local Oracle candidate query while preserving the existing Tavily merge and rerank flow. The Oracle table should have a Text index on the content column, for example:
+
+```sql
+CREATE INDEX tavily_docs_text_idx
+ON tavily_documents(content)
+INDEXTYPE IS CTXSYS.CONTEXT;
+```
+
+`enable_oracle_json_payload=True` and `enable_provenance_metadata=True` add write-through storage for Tavily provenance. These options expect matching Oracle columns, for example:
+
+```sql
+ALTER TABLE tavily_documents ADD (
+    raw_payload JSON,
+    source_url VARCHAR2(1000),
+    source_title VARCHAR2(500),
+    retrieval_query VARCHAR2(1000),
+    retrieval_timestamp TIMESTAMP WITH TIME ZONE,
+    retrieval_mode VARCHAR2(30),
+    cache_hit NUMBER(1),
+    inserted_from VARCHAR2(30),
+    provider_name VARCHAR2(50)
+);
+```
+
+You can create an Oracle vector index explicitly when needed:
+
+```python
+oracle_client = TavilyHybridClient(
+    api_key="tvly-YOUR_API_KEY",
+    db_provider="oracle",
+    connection=oracle_connection,
+    table_name="TAVILY_DOCUMENTS",
+    vector_index_name="TAVILY_DOCS_VEC_IDX",
+    vector_index_type="HNSW",
+    vector_index_distance="COSINE",
+)
+
+created = oracle_client.ensure_oracle_vector_index()
+```
+
+Provenance can be inspected with normal Oracle JSON SQL:
+
+```sql
+SELECT source_url,
+       JSON_VALUE(raw_payload, '$.provenance.retrieval_query') AS retrieval_query
+FROM tavily_documents
+WHERE JSON_EXISTS(raw_payload, '$.provenance.provider_name');
+```
+
 ## Advanced: Custom Session / Client Injection
 
 For enterprise environments that proxy Tavily traffic through an API gateway (e.g., for centralized auth, logging, or policy enforcement), you can pass a pre-configured HTTP session instead of a Tavily API key.

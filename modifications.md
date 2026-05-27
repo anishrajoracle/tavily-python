@@ -10,10 +10,11 @@ Compared with upstream `tavily-ai/tavily-python`, the following files were added
 
 | File | Change type | Purpose |
 | --- | --- | --- |
-| `tavily/hybrid_rag/hybrid_rag.py` | Modified | Added OracleDB support, provider branching, Oracle search/insert helpers, Oracle retrieval modes, safer Cohere setup, and guardrails. |
+| `tavily/hybrid_rag/hybrid_rag.py` | Modified | Added OracleDB support, provider branching, Oracle search/insert helpers, Oracle retrieval modes, Oracle AI Database feature flags, safer Cohere setup, and guardrails. |
 | `setup.py` | Modified | Added optional database extras for OracleDB and MongoDB. |
 | `examples/hybrid_rag_oracle.py` | Added | Added a runnable OracleDB example. |
 | `examples/hybrid_rag_oracle_modes.py` | Added | Shows Oracle `hybrid_search` and `freshness_cache` configuration side by side. |
+| `examples/hybrid_rag_oracle_ai_database.ipynb` | Added | Small notebook for Tavily search, Oracle persistence, freshness-cache hits, provenance inspection, and semantic dedup. |
 | `examples/hybrid_rag_oracle_smoke_test.py` | Added | Added a repeatable manual OracleDB + Tavily smoke test script. |
 | `tests/test_hybrid_rag_oracle.py` | Added | Added OracleDB-specific unit tests. |
 | `tests/test_hybrid_rag_safety.py` | Added | Added safety/regression tests around hybrid RAG behavior. |
@@ -90,6 +91,50 @@ query
 
 MongoDB continues to support only `hybrid_search`. Passing `retrieval_mode="freshness_cache"` with `db_provider="mongodb"` raises a clean unsupported-mode error.
 
+### Oracle AI Database Feature Flags
+
+Additional Oracle-only capabilities are opt-in so existing deployments keep their current behavior:
+
+```python
+enable_native_hybrid_search=False
+oracle_metadata_filters=None
+enable_oracle_json_payload=False
+enable_provenance_metadata=False
+dedup_similarity_threshold=None
+cache_timestamp_field="ADDED_AT"
+```
+
+When enabled, Oracle native hybrid search keeps the existing Python flow but changes the Oracle local candidate query to include:
+
+- `VECTOR_DISTANCE(...)`
+- Oracle Text `CONTAINS(...)`
+- Oracle Text `SCORE(1)`
+- optional exact-match metadata filters
+
+The combined local and Tavily results still flow through the existing Python reranking path.
+
+Oracle JSON/provenance persistence is limited to the Oracle write-through path. With the flags enabled, default `save_foreign=True` documents can include:
+
+- `RAW_PAYLOAD`
+- `SOURCE_URL`
+- `SOURCE_TITLE`
+- `RETRIEVAL_QUERY`
+- `RETRIEVAL_TIMESTAMP`
+- `RETRIEVAL_MODE`
+- `CACHE_HIT`
+- `INSERTED_FROM`
+- `PROVIDER_NAME`
+
+Semantic deduplication is also Oracle-only and optional. When `dedup_similarity_threshold` is set, the Oracle save path checks the nearest existing vector using the already-computed Tavily embedding and skips inserts whose nearest similarity is at or above the threshold.
+
+The Oracle vector index helper is explicit and does not run automatically:
+
+```python
+client.ensure_oracle_vector_index()
+```
+
+It checks `USER_INDEXES` first and only calls `DBMS_VECTOR.CREATE_INDEX(...)` when the index is missing.
+
 ### Constructor Changes
 
 The constructor now accepts both OracleDB and MongoDB configuration:
@@ -103,6 +148,19 @@ table_name: Optional[str] = None
 retrieval_mode: Literal["hybrid_search", "freshness_cache"] = "hybrid_search"
 cache_ttl_seconds: int = 86400
 cache_score_threshold: float = 0.0
+cache_timestamp_field: str = "ADDED_AT"
+enable_native_hybrid_search: bool = False
+oracle_metadata_filters: Optional[dict] = None
+enable_oracle_json_payload: bool = False
+enable_provenance_metadata: bool = False
+vector_index_name: Optional[str] = None
+vector_index_type: Literal["HNSW", "IVF"] = "HNSW"
+vector_index_distance: str = "COSINE"
+vector_index_accuracy: int = 90
+vector_index_neighbors: int = 40
+vector_index_efconstruction: int = 500
+vector_index_partitions: int = 10
+dedup_similarity_threshold: Optional[float] = None
 ```
 
 MongoDB path:
@@ -193,6 +251,14 @@ ADDED_AT >= CAST(SYSTIMESTAMP AS TIMESTAMP) - NUMTODSINTERVAL(:cache_ttl_seconds
 
 Rows returned by this query must also meet `cache_score_threshold` before Tavily is skipped.
 
+When `enable_native_hybrid_search=True`, Oracle local search uses an Oracle Text predicate and score in addition to vector similarity:
+
+```sql
+CONTAINS(CONTENT, :text_query, 1) > 0
+SCORE(1)
+VECTOR_DISTANCE(EMBEDDINGS, :query_vector, COSINE)
+```
+
 ### Saving Tavily Results
 
 The original save path used:
@@ -215,6 +281,8 @@ The Oracle insert helper:
 - Converts embedding lists into Oracle-compatible vector binds.
 - Uses `executemany(...)` for batch inserts.
 - Commits through the provided Oracle connection.
+- Optionally includes raw Tavily JSON payloads and provenance columns when enabled.
+- Optionally skips near-duplicate documents before insert when `dedup_similarity_threshold` is set.
 
 Oracle vector values are converted with:
 
@@ -292,6 +360,7 @@ Files added:
 ```text
 examples/hybrid_rag_oracle.py
 examples/hybrid_rag_oracle_modes.py
+examples/hybrid_rag_oracle_ai_database.ipynb
 examples/hybrid_rag_oracle_smoke_test.py
 ```
 
@@ -308,6 +377,17 @@ examples/hybrid_rag_oracle_smoke_test.py
 - Oracle `freshness_cache`
 - `cache_ttl_seconds`
 - `cache_score_threshold`
+- Oracle native hybrid search
+- JSON/provenance persistence
+- semantic deduplication
+
+`examples/hybrid_rag_oracle_ai_database.ipynb` shows:
+
+- Tavily search
+- Oracle persistence
+- freshness-cache hit behavior
+- JSON provenance inspection
+- semantic deduplication
 
 `examples/hybrid_rag_oracle_smoke_test.py` is a repeatable manual smoke test. It:
 
@@ -350,6 +430,10 @@ Coverage added:
 - Oracle `save_foreign=True` inserts Tavily foreign results through the Oracle path.
 - Oracle `freshness_cache` skips Tavily on a fresh, high-scoring local hit.
 - Oracle `freshness_cache` calls Tavily and saves foreign results on a cache miss.
+- Oracle native hybrid search emits `CONTAINS(...)`, `SCORE(1)`, and metadata filters.
+- Oracle JSON/provenance persistence writes raw payload and provenance columns.
+- Oracle vector index helper creates missing indexes and skips existing indexes.
+- Oracle semantic deduplication skips near-duplicate inserts.
 - Unsafe Oracle identifiers are rejected.
 
 ### New Safety Tests
@@ -366,6 +450,7 @@ Coverage added:
 - `embedding_function` must be callable.
 - `ranking_function` must be callable.
 - MongoDB rejects Oracle-only `freshness_cache` mode.
+- MongoDB ignores Oracle-only feature flags in `hybrid_search` mode.
 
 ### Existing Error Test Fix
 
@@ -395,7 +480,7 @@ Full test suite:
 Result:
 
 ```text
-83 passed in 0.40s
+89 passed in 0.39s
 ```
 
 Targeted tests:
@@ -407,7 +492,7 @@ Targeted tests:
 Result:
 
 ```text
-12 passed in 0.04s
+18 passed in 0.04s
 ```
 
 Manual OracleDB integration testing was also completed against a local Oracle container. The Oracle path successfully:
@@ -450,6 +535,30 @@ EMBEDDINGS
 Any extra keys returned by a custom `save_foreign` function must map to real Oracle table columns.
 
 `freshness_cache` mode uses `ADDED_AT` for TTL validation. The default Oracle `save_foreign=True` path can rely on the table default to populate it.
+
+Optional Oracle AI Database columns:
+
+```sql
+ALTER TABLE tavily_documents ADD (
+    raw_payload JSON,
+    source_url VARCHAR2(1000),
+    source_title VARCHAR2(500),
+    retrieval_query VARCHAR2(1000),
+    retrieval_timestamp TIMESTAMP WITH TIME ZONE,
+    retrieval_mode VARCHAR2(30),
+    cache_hit NUMBER(1),
+    inserted_from VARCHAR2(30),
+    provider_name VARCHAR2(50)
+);
+```
+
+Optional Oracle Text index for native hybrid search:
+
+```sql
+CREATE INDEX tavily_docs_text_idx
+ON tavily_documents(content)
+INDEXTYPE IS CTXSYS.CONTEXT;
+```
 
 ## Non-Goals
 
