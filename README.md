@@ -257,6 +257,52 @@ OracleDB supports two retrieval modes:
 
 Freshness-cache mode expects Oracle rows to have an `ADDED_AT` timestamp column, for example `ADDED_AT TIMESTAMP DEFAULT SYSTIMESTAMP`, so the client can apply `cache_ttl_seconds`.
 
+## Why Oracle
+
+The Oracle path in `TavilyHybridClient` is designed for applications that want Tavily web results to become durable retrieval context over time. Existing Oracle support is additive to the standard Tavily SDK and the MongoDB hybrid RAG workflow.
+
+Oracle-specific value already implemented in this repository:
+
+| Capability | Current support |
+| --- | --- |
+| Native VECTOR storage | Oracle rows store embeddings in a `VECTOR` column and local retrieval uses `VECTOR_DISTANCE(...)`. |
+| Native JSON storage | `enable_oracle_json_payload=True` can persist the raw Tavily payload and retrieval provenance into a JSON column. |
+| Hybrid retrieval | `enable_native_hybrid_search=True` combines Oracle Vector Search with Oracle Text scoring for local candidates. |
+| Persistent cache | `retrieval_mode="freshness_cache"` checks fresh Oracle rows before calling Tavily and can write Tavily misses back to Oracle. |
+| Long-term memory | `retrieval_mode="hybrid_search"` can query persisted Oracle rows, combine them with fresh Tavily results, and rerank the merged set. |
+| Oracle reviewability | Optional provenance columns record source URL, source title, retrieval query, retrieval mode, cache-hit state, and provider. |
+| Semantic deduplication | `dedup_similarity_threshold` can skip near-duplicate Oracle inserts by comparing the nearest stored vector. |
+
+## Architecture Overview
+
+The Oracle freshness-cache flow follows an Oracle-first lookup, Tavily fallback, and optional Oracle write-through persistence model:
+
+```text
+User Query
+     |
+     v
+Oracle Cache Lookup
+     |
+     +---- Hit ---> Return
+     |
+     +---- Miss
+                |
+                v
+           Tavily Search
+                |
+                v
+        Oracle Persistence
+                |
+                v
+             Return
+```
+
+For `retrieval_mode="freshness_cache"`, the client embeds the query, searches Oracle rows inside the configured TTL window, and returns Oracle results when at least one local result meets `cache_score_threshold`. On a miss, it calls Tavily, optionally saves Tavily results when `save_foreign=True`, and returns the fresh Tavily results.
+
+For `retrieval_mode="hybrid_search"`, the client searches Oracle local memory, calls Tavily when `max_foreign > 0`, projects both result sets into the existing result shape, reranks them with the configured ranking function, and optionally persists Tavily results.
+
+For a deeper architecture map, capability matrix, and implementation reference table, see [docs/oracle_architecture.md](docs/oracle_architecture.md).
+
 ```python
 from tavily import TavilyHybridClient
 
@@ -351,6 +397,59 @@ SELECT source_url,
 FROM tavily_documents
 WHERE JSON_EXISTS(raw_payload, '$.provenance.provider_name');
 ```
+
+## Troubleshooting Guide
+
+Common setup issues are usually configuration-related:
+
+| Issue | Resolution |
+| --- | --- |
+| Missing Tavily API key | Set `TAVILY_API_KEY`, pass `api_key=...`, or provide a pre-authenticated custom session/client. |
+| Oracle connection failure | Verify `ORACLE_USER`, `ORACLE_PASSWORD`, `ORACLE_DSN`, service name, network access, and whether `ORACLE_SYSDBA=1` is required by your local setup. |
+| Missing Oracle dependencies | Install the optional Oracle extra with `python -m pip install -e ".[oracle]"` or install `oracledb` in your environment. |
+| Vector search errors | Confirm the table has a compatible `VECTOR` column, stored vectors have the expected dimension, and the database supports Oracle Vector Search. |
+| Vector index creation errors | Ensure the database supports `DBMS_VECTOR.CREATE_INDEX`, the user has privileges, and the requested index name is a valid Oracle identifier. |
+| Native hybrid search errors | Create an Oracle Text index on the content column before using `enable_native_hybrid_search=True`. |
+| JSON/provenance insert errors | Add the optional `RAW_PAYLOAD` and provenance columns before enabling JSON/provenance persistence. |
+| Freshness cache always misses | Confirm the timestamp column exists, defaults to `SYSTIMESTAMP`, and `cache_ttl_seconds` plus `cache_score_threshold` match your data. |
+
+See [TROUBLESHOOTING.md](TROUBLESHOOTING.md) for detailed diagnostics and example fixes.
+
+## Contributing Guide
+
+Contributors should preserve the existing public APIs and user workflows. Keep Oracle, Tavily, MongoDB, cache, retrieval, persistence, hybrid search, deduplication, and vector search behavior backward compatible.
+
+Local development basics:
+
+```bash
+python -m venv .venv
+source .venv/bin/activate
+python -m pip install --upgrade pip
+python -m pip install -e ".[oracle,mongodb]" pytest
+python -m pytest
+```
+
+Lightweight quality tooling is configured but intentionally conservative:
+
+```bash
+ruff check .
+mypy
+```
+
+See [CONTRIBUTING.md](CONTRIBUTING.md) for repository structure, coding standards, and pull request guidance.
+
+## Deployment Guide
+
+The current Oracle deployment model expects the application to provide:
+
+- A Tavily API key or a pre-authenticated custom HTTP session/client.
+- A `python-oracledb` connection.
+- An Oracle table with content and embedding columns.
+- Optional timestamp, JSON, provenance, Oracle Text, and vector index setup depending on enabled features.
+
+Local Oracle and Oracle 23ai setups can use the same client configuration shown above. The repository does not require a new service, schema migration runner, or connection factory; existing examples pass an already-created Oracle connection into `TavilyHybridClient`.
+
+See [DEPLOYMENT.md](DEPLOYMENT.md) for local Oracle usage, Oracle 23ai notes, schema examples, and environment variables used by the examples.
 
 ## Advanced: Custom Session / Client Injection
 
