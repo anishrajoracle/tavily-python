@@ -303,6 +303,10 @@ For `retrieval_mode="hybrid_search"`, the client searches Oracle local memory, c
 
 For a deeper architecture map, capability matrix, and implementation reference table, see [docs/oracle_architecture.md](docs/oracle_architecture.md).
 
+Example notebook:
+
+- `examples/oracle_tavily.ipynb` — Complete Oracle AI Database demo showing hybrid search, cache-only mode, VECTOR search, JSON provenance, semantic deduplication, and Tavily fallback.
+
 ```python
 from tavily import TavilyHybridClient
 

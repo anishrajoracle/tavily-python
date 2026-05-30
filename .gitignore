@@ -7,10 +7,22 @@ dist/
 # Cache
 __pycache__/
 .pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+.tox/
+.nox/
 
 # Other
 .DS_Store
 .env
+.venv/
 venv/
 test_local.py
 test_local_suite.py
+
+# Local tool config
+mypy.ini
+ruff.toml
+pytest.ini
