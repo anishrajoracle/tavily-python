@@ -44,6 +44,26 @@ def validate_index(client):
         raise ValueError(f"Index '{client.index}' does not exist.")
 
 
+def validate_client(client):
+    validate_index(client)
+
+
+def search_provider(client, query_embeddings, max_local,
+                    query=None, cache_ttl_seconds=None):
+    return search(
+        client.collection,
+        client.index,
+        client.embeddings_field,
+        client.content_field,
+        query_embeddings,
+        max_local
+    )
+
+
+def insert_provider(client, documents):
+    insert_documents(client.collection, documents)
+
+
 def search(collection, index, embeddings_field, content_field, query_embeddings, max_local):
     return list(collection.aggregate([
         {

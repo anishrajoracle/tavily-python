@@ -130,9 +130,9 @@ Query Embedding
 ## Search Flow
 
 1. `TavilyHybridClient.search(...)` embeds the user query with the configured `embedding_function`.
-2. For Oracle, `_search_oracle(...)` searches the configured table with `VECTOR_DISTANCE(...)`.
-3. In `freshness_cache` mode, `_build_oracle_freshness_filter(...)` adds the TTL predicate against `cache_timestamp_field`.
-4. If fresh local results meet `cache_score_threshold`, `_search_oracle_freshness_cache(...)` returns local results and does not call Tavily.
+2. For Oracle, `tavily.databases.oracledb.search_provider(...)` searches the configured table with `VECTOR_DISTANCE(...)`.
+3. In `freshness_cache` mode, `tavily.databases.oracledb.build_freshness_filter(...)` adds the TTL predicate against `cache_timestamp_field`.
+4. If fresh local results meet `cache_score_threshold`, `TavilyHybridClient._search_oracle_freshness_cache(...)` returns local results and does not call Tavily.
 5. On a miss, `_search_tavily(...)` calls `self.tavily.search(...)`.
 6. `_project_foreign_results(...)` converts Tavily results into the existing hybrid result shape.
 7. `ranking_function(...)` reranks merged results in `hybrid_search` mode.
@@ -170,28 +170,28 @@ The default `save_foreign=True` Oracle document includes only the configured con
 | Capability | Existing implementation | Notes |
 | --- | --- | --- |
 | Tavily integration | `TavilyHybridClient._search_tavily(...)` delegates to `TavilyClient.search(...)`. | No duplicate Tavily request logic in the hybrid client. |
-| Oracle VECTOR usage | `_search_oracle(...)`, `_search_oracle_native_hybrid(...)`, and `_insert_oracle_documents(...)`. | Embeddings are bound as float arrays for Oracle vector columns. |
-| Oracle JSON usage | `_build_oracle_persistence_metadata(...)`. | Enabled with `enable_oracle_json_payload=True`. |
+| Oracle VECTOR usage | `tavily.databases.oracledb.search(...)`, `search_native_hybrid(...)`, and `insert_documents(...)`. | Embeddings are bound as float arrays for Oracle vector columns. |
+| Oracle JSON usage | `tavily.databases.oracledb.build_persistence_metadata(...)`. | Enabled with `enable_oracle_json_payload=True`. |
 | Hybrid retrieval | `retrieval_mode="hybrid_search"`. | Local plus foreign results are reranked by the configured ranking function. |
 | Freshness cache lifecycle | `_search_oracle_freshness_cache(...)`. | TTL and score threshold determine cache hits. |
-| Oracle persistence workflow | `_save_foreign_results(...)` and `_insert_oracle_documents(...)`. | Triggered by `save_foreign=True` or a custom `save_foreign` callable. |
-| Semantic deduplication | `_filter_oracle_duplicate_documents(...)` and `_is_oracle_duplicate(...)`. | Enabled only when `dedup_similarity_threshold` is set. |
-| Native Oracle hybrid search | `_search_oracle_native_hybrid(...)`. | Requires an Oracle Text index on the content column. |
+| Oracle persistence workflow | `_save_foreign_results(...)` and `tavily.databases.oracledb.insert_provider(...)`. | Triggered by `save_foreign=True` or a custom `save_foreign` callable. |
+| Semantic deduplication | `tavily.databases.oracledb.filter_duplicate_documents(...)` and `is_duplicate(...)`. | Enabled only when `dedup_similarity_threshold` is set. |
+| Native Oracle hybrid search | `tavily.databases.oracledb.search_native_hybrid(...)`. | Requires an Oracle Text index on the content column. |
 | Vector index lifecycle | `ensure_oracle_vector_index(...)`. | Explicit helper; it does not run automatically. |
-| Metadata filtering | `_build_oracle_metadata_filter(...)`. | Column names are validated as Oracle identifiers. |
+| Metadata filtering | `tavily.databases.oracledb.build_metadata_filter(...)`. | Column names are validated as Oracle identifiers. |
 
 ## Oracle Implementation References
 
 | Area | Reference |
 | --- | --- |
-| Oracle constructor options and validation | `tavily/hybrid_rag/hybrid_rag.py`, `TavilyHybridClient.__init__`. |
-| Oracle vector search SQL | `tavily/hybrid_rag/hybrid_rag.py`, `_search_oracle`. |
-| Oracle native hybrid SQL | `tavily/hybrid_rag/hybrid_rag.py`, `_search_oracle_native_hybrid`. |
+| Oracle constructor options and validation | `tavily/hybrid_rag/hybrid_rag.py`, `TavilyHybridClient.__init__`, plus `tavily/databases/oracledb.py` validation helpers. |
+| Oracle vector search SQL | `tavily/databases/oracledb.py`, `search`. |
+| Oracle native hybrid SQL | `tavily/databases/oracledb.py`, `search_native_hybrid`. |
 | Freshness cache flow | `tavily/hybrid_rag/hybrid_rag.py`, `_search_oracle_freshness_cache`. |
-| JSON and provenance metadata | `tavily/hybrid_rag/hybrid_rag.py`, `_build_oracle_persistence_metadata`. |
-| Deduplication | `tavily/hybrid_rag/hybrid_rag.py`, `_filter_oracle_duplicate_documents` and `_is_oracle_duplicate`. |
+| JSON and provenance metadata | `tavily/databases/oracledb.py`, `build_persistence_metadata`. |
+| Deduplication | `tavily/databases/oracledb.py`, `filter_duplicate_documents` and `is_duplicate`. |
 | Vector index helper | `tavily/hybrid_rag/hybrid_rag.py`, `ensure_oracle_vector_index`. |
-| Oracle examples | `examples/hybrid_rag_oracle.py`, `examples/hybrid_rag_oracle_modes.py`, `examples/hybrid_rag_oracle_smoke_test.py`. |
+| Oracle examples | `examples/oracle_tavily.ipynb`. |
 | Oracle tests | `tests/test_hybrid_rag_oracle.py`, `tests/test_hybrid_rag_safety.py`. |
 
 ## Convenience API Assessment

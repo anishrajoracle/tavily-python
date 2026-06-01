@@ -1,6 +1,7 @@
 import pytest
 
 from tavily import TavilyHybridClient
+from tavily.databases import oracledb as oracle_database
 
 
 class FakeCursor:
@@ -138,7 +139,7 @@ def test_oracle_insert_converts_embeddings_to_vector_bind():
         ranking_function=lambda _, documents, __: documents,
     )
 
-    client._insert_oracle_documents([
+    oracle_database.insert_documents(client, [
         {
             "content": "foreign content",
             "embeddings": [0.4, 0.5, 0.6],

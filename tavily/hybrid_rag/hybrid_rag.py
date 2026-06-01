@@ -2,60 +2,12 @@ from typing import Callable, Literal, Optional, Sequence, Union
 
 import requests
 from tavily import TavilyClient
-from tavily.databases import mongodb
+from tavily.databases import get_provider
+from tavily.databases.base import DatabaseProvider
 from tavily.databases import oracledb as oracle_database
-from tavily.databases.config import ORACLE_CACHE_TIMESTAMP_FIELD, RETRIEVAL_MODES
-
-try:
-    import cohere
-except ImportError:
-    cohere = None
-
-co = None
-
-def _get_cohere_client():
-    global co
-
-    if co is not None:
-        return co
-
-    if cohere is None:
-        raise ImportError(
-            "The default hybrid RAG embedding and ranking functions require "
-            "the 'cohere' package. Install cohere or provide custom "
-            "embedding_function and ranking_function callables."
-        )
-
-    try:
-        co = cohere.Client()
-    except Exception as exc:
-        raise RuntimeError(
-            "Failed to initialize the Cohere client. Set the required Cohere "
-            "environment variables or provide custom embedding_function and "
-            "ranking_function callables."
-        ) from exc
-
-    return co
-
-
-def _cohere_embed(texts, input_type):
-    client = _get_cohere_client()
-    return client.embed(
-        model='embed-english-v3.0',
-        texts=texts,
-        input_type=input_type
-    ).embeddings
-
-
-def _cohere_rerank(query, documents, top_n):
-    client = _get_cohere_client()
-    response = client.rerank(model='rerank-english-v3.0', query=query,
-                             documents=[doc['content'] for doc in documents], top_n=top_n)
-
-    return [
-        documents[result.index] | {'score': result.relevance_score}
-        for result in response.results
-    ]
+from tavily.databases.config import RETRIEVAL_MODES
+from tavily.databases.oracle_config import ORACLE_CACHE_TIMESTAMP_FIELD
+from tavily.hybrid_rag.embeddings import cohere_embed, cohere_rerank
 
 
 class TavilyHybridClient():
@@ -124,8 +76,7 @@ class TavilyHybridClient():
 
         self.tavily = TavilyClient(api_key, session=session)
 
-        if db_provider not in ('mongodb', 'oracle'):
-            raise ValueError("Supported database providers are 'mongodb' and 'oracle'.")
+        self.database_provider: DatabaseProvider = get_provider(db_provider)
         if retrieval_mode not in RETRIEVAL_MODES:
             raise ValueError(
                 "Supported retrieval modes are 'hybrid_search' and 'freshness_cache'."
@@ -194,19 +145,15 @@ class TavilyHybridClient():
                 except (TypeError, ValueError) as exc:
                     raise ValueError("dedup_similarity_threshold must be a number.") from exc
 
-        self.embedding_function = _cohere_embed if embedding_function is None else embedding_function
-        self.ranking_function = _cohere_rerank if ranking_function is None else ranking_function
+        self.embedding_function = cohere_embed if embedding_function is None else embedding_function
+        self.ranking_function = cohere_rerank if ranking_function is None else ranking_function
 
         if not callable(self.embedding_function):
             raise TypeError("embedding_function must be callable.")
         if not callable(self.ranking_function):
             raise TypeError("ranking_function must be callable.")
 
-        if db_provider == 'mongodb':
-            mongodb.validate_index(self)
-        elif db_provider == 'oracle':
-            # Oracle config is validated above when identifiers are normalized.
-            pass
+        self.database_provider.validate_client(self)
 
     def search(self, query, max_results=10, max_local=None, max_foreign=None,
                save_foreign=False, **kwargs):
@@ -231,16 +178,7 @@ class TavilyHybridClient():
 
         query_embeddings = self.embedding_function([query], 'search_query')[0]
 
-        if self.db_provider == 'mongodb':
-            local_results = mongodb.search(
-                self.collection,
-                self.index,
-                self.embeddings_field,
-                self.content_field,
-                query_embeddings,
-                max_local
-            )
-        elif self.db_provider == 'oracle':
+        if self.db_provider == 'oracle':
             if self.retrieval_mode == 'freshness_cache':
                 return self._search_oracle_freshness_cache(
                     query,
@@ -251,9 +189,12 @@ class TavilyHybridClient():
                     save_foreign,
                     **kwargs
                 )
-            local_results = self._search_oracle(query_embeddings, max_local, query=query)
-        else:
-            raise ValueError(f"Unsupported database provider: {self.db_provider}")
+        local_results = self.database_provider.search_provider(
+            self,
+            query_embeddings,
+            max_local,
+            query=query
+        )
 
         foreign_results = self._search_tavily(query, max_foreign, **kwargs)
 
@@ -327,20 +268,13 @@ class TavilyHybridClient():
         if not documents:
             return
 
-        if self.db_provider == 'mongodb':
-            mongodb.insert_documents(self.collection, documents)
-        elif self.db_provider == 'oracle':
-            documents = oracle_database.filter_duplicate_documents(self, documents)
-            if not documents:
-                return
-            oracle_database.insert_documents(self, documents)
-        else:
-            raise ValueError(f"Unsupported database provider: {self.db_provider}")
+        self.database_provider.insert_provider(self, documents)
 
     def _search_oracle_freshness_cache(self, query, query_embeddings, max_results,
                                        max_local, max_foreign, save_foreign,
                                        **kwargs):
-        local_results = self._search_oracle(
+        local_results = self.database_provider.search_provider(
+            self,
             query_embeddings,
             max_local,
             query=query,
@@ -370,58 +304,5 @@ class TavilyHybridClient():
         )
         return results[:max_results]
 
-    def _search_oracle(self, query_embeddings, max_local, query=None, cache_ttl_seconds=None):
-        return oracle_database.search(
-            self,
-            query_embeddings,
-            max_local,
-            query=query,
-            cache_ttl_seconds=cache_ttl_seconds
-        )
-
-    def _search_oracle_native_hybrid(self, query_embeddings, max_local, query,
-                                     cache_ttl_seconds=None):
-        return oracle_database.search_native_hybrid(
-            self,
-            query_embeddings,
-            max_local,
-            query,
-            cache_ttl_seconds=cache_ttl_seconds
-        )
-
-    def _build_oracle_freshness_filter(self, cache_ttl_seconds, execute_kwargs):
-        return oracle_database.build_freshness_filter(
-            self.cache_timestamp_field,
-            cache_ttl_seconds,
-            execute_kwargs
-        )
-
-    def _build_oracle_metadata_filter(self, execute_kwargs):
-        return oracle_database.build_metadata_filter(self.oracle_metadata_filters, execute_kwargs)
-
-    def _build_oracle_persistence_metadata(self, result, query, cache_hit):
-        return oracle_database.build_persistence_metadata(self, result, query, cache_hit)
-
-    def _filter_oracle_duplicate_documents(self, documents):
-        return oracle_database.filter_duplicate_documents(self, documents)
-
-    def _get_oracle_document_value(self, document, column_name):
-        return oracle_database.get_document_value(document, column_name)
-
-    def _is_oracle_duplicate(self, embedding):
-        return oracle_database.is_duplicate(self, embedding)
-
     def ensure_oracle_vector_index(self, index_name=None):
         return oracle_database.ensure_vector_index(self, index_name=index_name)
-
-    def _oracle_vector_index_parameters(self):
-        return oracle_database.vector_index_parameters(self)
-
-    def _validate_oracle_vector_index_type(self, value):
-        return oracle_database.validate_vector_index_type(value)
-
-    def _validate_oracle_vector_distance(self, value):
-        return oracle_database.validate_vector_distance(value)
-
-    def _insert_oracle_documents(self, documents):
-        return oracle_database.insert_documents(self, documents)

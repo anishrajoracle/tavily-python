@@ -2,7 +2,7 @@ import array
 from datetime import datetime, timezone
 import json
 
-from tavily.databases.config import (
+from tavily.databases.oracle_config import (
     ORACLE_CACHE_HIT_FIELD,
     ORACLE_IDENTIFIER,
     ORACLE_INSERTED_FROM_FIELD,
@@ -17,6 +17,28 @@ from tavily.databases.config import (
     ORACLE_VECTOR_INDEX_ORGANIZATIONS,
     ORACLE_VECTOR_INDEX_TYPES,
 )
+
+
+def validate_client(_client):
+    return None
+
+
+def search_provider(client, query_embeddings, max_local, query=None,
+                    cache_ttl_seconds=None):
+    return search(
+        client,
+        query_embeddings,
+        max_local,
+        query=query,
+        cache_ttl_seconds=cache_ttl_seconds
+    )
+
+
+def insert_provider(client, documents):
+    documents = filter_duplicate_documents(client, documents)
+    if not documents:
+        return
+    insert_documents(client, documents)
 
 
 def validate_identifier(value, name):
