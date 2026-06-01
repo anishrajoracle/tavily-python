@@ -1,13 +1,16 @@
 from typing import Callable, Literal, Optional, Sequence, Union
+from time import monotonic
 
 import requests
 from tavily import TavilyClient
 from tavily.databases import get_provider
 from tavily.databases.base import DatabaseProvider
+from tavily.databases.connections import connect_mongodb, connect_oracle
 from tavily.databases import oracledb as oracle_database
-from tavily.databases.config import RETRIEVAL_MODES
+from tavily.databases.config import PERSISTENCE_DEPTHS, RETRIEVAL_MODES
 from tavily.databases.oracle_config import ORACLE_CACHE_TIMESTAMP_FIELD
 from tavily.hybrid_rag.embeddings import cohere_embed, cohere_rerank
+from tavily.hybrid_rag import retrieval_modes
 
 
 class TavilyHybridClient():
@@ -24,10 +27,14 @@ class TavilyHybridClient():
             embedding_function: Optional[Callable[[Sequence[str], str], Sequence[Sequence[float]]]] = None,
             ranking_function: Optional[Callable[[str, list, int], list]] = None,
             session: Optional[requests.Session] = None,
-            retrieval_mode: Literal['hybrid_search', 'freshness_cache'] = 'hybrid_search',
+            retrieval_mode: Literal['hybrid_search', 'freshness_cache', 'cache_then_memory'] = 'hybrid_search',
             cache_ttl_seconds: int = 86400,
             cache_score_threshold: float = 0.0,
             cache_timestamp_field: str = ORACLE_CACHE_TIMESTAMP_FIELD,
+            persistence_depth: Literal['cache_only', 'cache_plus_memory'] = 'cache_only',
+            memory_score_threshold: float = 0.0,
+            memory_max_results: Optional[int] = None,
+            enable_oracle_memory_metadata: bool = False,
             enable_native_hybrid_search: bool = False,
             oracle_metadata_filters: Optional[dict] = None,
             enable_oracle_json_payload: bool = False,
@@ -39,7 +46,20 @@ class TavilyHybridClient():
             vector_index_neighbors: int = 40,
             vector_index_efconstruction: int = 500,
             vector_index_partitions: int = 10,
-            dedup_similarity_threshold: Optional[float] = None
+            dedup_similarity_threshold: Optional[float] = None,
+            oracle_upsert_key: Optional[Literal['source_url', 'content_hash']] = None,
+            max_persisted_foreign: Optional[int] = None,
+            persist_score_threshold: Optional[float] = None,
+            oracle_user: Optional[str] = None,
+            oracle_password: Optional[str] = None,
+            oracle_dsn: Optional[str] = None,
+            oracle_connection_kwargs: Optional[dict] = None,
+            mongo_uri: Optional[str] = None,
+            mongo_database: Optional[str] = None,
+            mongo_collection: Optional[str] = None,
+            mongo_client_kwargs: Optional[dict] = None,
+            auto_cleanup_cache: bool = False,
+            cache_cleanup_interval_seconds: int = 3600
         ):
         '''
         A client for performing hybrid RAG using both the Tavily API and a local database.
@@ -56,10 +76,14 @@ class TavilyHybridClient():
         embedding_function (callable): If provided, this function will be used to generate embeddings for the search query and documents.
         ranking_function (callable): If provided, this function will be used to rerank the combined results.
         session (requests.Session): If provided, this pre-configured session will be used for HTTP requests. When set, api_key is optional.
-        retrieval_mode (str): Retrieval mode. 'hybrid_search' is supported for MongoDB and Oracle. 'freshness_cache' is Oracle-only.
+        retrieval_mode (str): Retrieval mode. 'hybrid_search' is supported for MongoDB and Oracle. 'freshness_cache' and 'cache_then_memory' are Oracle-only.
         cache_ttl_seconds (int): Freshness window used by Oracle freshness_cache mode.
         cache_score_threshold (float): Minimum local score needed for an Oracle freshness_cache hit.
         cache_timestamp_field (str): Oracle timestamp column used by freshness_cache mode.
+        persistence_depth (str): Oracle memory lifecycle scope, 'cache_only' or 'cache_plus_memory'.
+        memory_score_threshold (float): Minimum local score needed for an Oracle long-term memory hit.
+        memory_max_results (int): Maximum long-term memory results to inspect in cache_then_memory mode.
+        enable_oracle_memory_metadata (bool): If True, Oracle save_foreign=True writes cache/memory lifecycle columns.
         enable_native_hybrid_search (bool): If True, Oracle local search uses Oracle Text scoring along with vector similarity.
         oracle_metadata_filters (dict): Optional Oracle column filters applied during local Oracle search.
         enable_oracle_json_payload (bool): If True, Oracle save_foreign=True writes RAW_PAYLOAD JSON.
@@ -72,32 +96,111 @@ class TavilyHybridClient():
         vector_index_efconstruction (int): HNSW efConstruction parameter.
         vector_index_partitions (int): IVF partitions parameter.
         dedup_similarity_threshold (float): If set for Oracle, skip insert when nearest local similarity is at or above this threshold.
+        oracle_upsert_key (str): If set for Oracle, merge persisted Tavily rows by 'source_url' or 'content_hash'.
+        max_persisted_foreign (int): Optional cap on how many Tavily results are persisted per search.
+        persist_score_threshold (float): Optional minimum Tavily score required before persisting a result.
+        oracle_user (str): Optional Oracle username used to create a connection when connection is not provided.
+        oracle_password (str): Optional Oracle password used to create a connection when connection is not provided.
+        oracle_dsn (str): Optional Oracle DSN used to create a connection when connection is not provided.
+        oracle_connection_kwargs (dict): Extra keyword arguments forwarded to oracledb.connect().
+        mongo_uri (str): Optional MongoDB URI used to create a collection when collection is not provided.
+        mongo_database (str): MongoDB database name used with mongo_uri.
+        mongo_collection (str): MongoDB collection name used with mongo_uri.
+        mongo_client_kwargs (dict): Extra keyword arguments forwarded to pymongo.MongoClient().
+        auto_cleanup_cache (bool): If True for Oracle, expired cache rows are cleaned up before search.
+        cache_cleanup_interval_seconds (int): Minimum seconds between automatic cleanup attempts.
         '''
 
         self.tavily = TavilyClient(api_key, session=session)
+        self._managed_mongo_client = None
+        self._managed_oracle_connection = None
+
+        if (
+            db_provider == 'mongodb'
+            and collection is None
+            and any(value is not None for value in (mongo_uri, mongo_database, mongo_collection))
+        ):
+            self._managed_mongo_client, collection = connect_mongodb(
+                mongo_uri,
+                mongo_database,
+                mongo_collection,
+                mongo_client_kwargs=mongo_client_kwargs
+            )
+
+        if (
+            db_provider == 'oracle'
+            and connection is None
+            and any(value is not None for value in (oracle_user, oracle_password, oracle_dsn))
+        ):
+            connection = connect_oracle(
+                oracle_user,
+                oracle_password,
+                oracle_dsn,
+                oracle_connection_kwargs=oracle_connection_kwargs
+            )
+            self._managed_oracle_connection = connection
 
         self.database_provider: DatabaseProvider = get_provider(db_provider)
         if retrieval_mode not in RETRIEVAL_MODES:
             raise ValueError(
-                "Supported retrieval modes are 'hybrid_search' and 'freshness_cache'."
+                "Supported retrieval modes are 'hybrid_search', "
+                "'freshness_cache', and 'cache_then_memory'."
             )
-        if db_provider != 'oracle' and retrieval_mode == 'freshness_cache':
+        if db_provider != 'oracle' and retrieval_mode in ('freshness_cache', 'cache_then_memory'):
             raise ValueError(
-                "retrieval_mode='freshness_cache' is only supported when "
+                "retrieval_mode='freshness_cache' and "
+                "retrieval_mode='cache_then_memory' are only supported when "
                 "db_provider='oracle'."
             )
-        if retrieval_mode == 'freshness_cache':
+        if (
+            db_provider == 'oracle'
+            and (
+                retrieval_mode in ('freshness_cache', 'cache_then_memory')
+                or enable_oracle_memory_metadata
+            )
+        ):
             if cache_ttl_seconds <= 0:
                 raise ValueError("cache_ttl_seconds must be greater than 0.")
+        if db_provider == 'oracle' and retrieval_mode in ('freshness_cache', 'cache_then_memory'):
             try:
                 cache_score_threshold = float(cache_score_threshold)
             except (TypeError, ValueError) as exc:
                 raise ValueError("cache_score_threshold must be a number.") from exc
+        if db_provider == 'oracle':
+            if persistence_depth not in PERSISTENCE_DEPTHS:
+                raise ValueError(
+                    "persistence_depth must be 'cache_only' or 'cache_plus_memory'."
+                )
+            try:
+                memory_score_threshold = float(memory_score_threshold)
+            except (TypeError, ValueError) as exc:
+                raise ValueError("memory_score_threshold must be a number.") from exc
+            if memory_max_results is not None and memory_max_results <= 0:
+                raise ValueError("memory_max_results must be greater than 0.")
+            if oracle_upsert_key not in (None, "source_url", "content_hash"):
+                raise ValueError(
+                    "oracle_upsert_key must be 'source_url', 'content_hash', or None."
+                )
+        if max_persisted_foreign is not None and max_persisted_foreign <= 0:
+            raise ValueError("max_persisted_foreign must be greater than 0.")
+        if persist_score_threshold is not None:
+            try:
+                persist_score_threshold = float(persist_score_threshold)
+            except (TypeError, ValueError) as exc:
+                raise ValueError("persist_score_threshold must be a number.") from exc
+        if auto_cleanup_cache and db_provider != 'oracle':
+            raise ValueError("auto_cleanup_cache is only supported when db_provider='oracle'.")
+        if auto_cleanup_cache and cache_cleanup_interval_seconds <= 0:
+            raise ValueError("cache_cleanup_interval_seconds must be greater than 0.")
 
         self.db_provider = db_provider
         self.retrieval_mode = retrieval_mode
         self.cache_ttl_seconds = cache_ttl_seconds
         self.cache_score_threshold = cache_score_threshold
+        self.persistence_depth = persistence_depth
+        self.memory_score_threshold = memory_score_threshold
+        self.memory_max_results = memory_max_results
+        self.enable_oracle_memory_metadata = enable_oracle_memory_metadata
         self.collection = collection
         self.index = index
         self.connection = connection
@@ -114,6 +217,12 @@ class TavilyHybridClient():
         self.vector_index_efconstruction = vector_index_efconstruction
         self.vector_index_partitions = vector_index_partitions
         self.dedup_similarity_threshold = dedup_similarity_threshold
+        self.oracle_upsert_key = oracle_upsert_key if db_provider == 'oracle' else None
+        self.max_persisted_foreign = max_persisted_foreign
+        self.persist_score_threshold = persist_score_threshold
+        self.auto_cleanup_cache = auto_cleanup_cache
+        self.cache_cleanup_interval_seconds = cache_cleanup_interval_seconds
+        self._last_cache_cleanup_at = None
         self.cache_timestamp_field = cache_timestamp_field
 
         if db_provider == 'mongodb':
@@ -176,11 +285,25 @@ class TavilyHybridClient():
         if max_foreign is None:
             max_foreign = max_results
 
+        self._maybe_cleanup_cache()
+
         query_embeddings = self.embedding_function([query], 'search_query')[0]
 
         if self.db_provider == 'oracle':
             if self.retrieval_mode == 'freshness_cache':
-                return self._search_oracle_freshness_cache(
+                return retrieval_modes.search_oracle_freshness_cache(
+                    self,
+                    query,
+                    query_embeddings,
+                    max_results,
+                    max_local,
+                    max_foreign,
+                    save_foreign,
+                    **kwargs
+                )
+            if self.retrieval_mode == 'cache_then_memory':
+                return retrieval_modes.search_oracle_cache_then_memory(
+                    self,
                     query,
                     query_embeddings,
                     max_results,
@@ -237,6 +360,10 @@ class TavilyHybridClient():
         if not (max_foreign > 0 and save_foreign != False):
             return
 
+        foreign_results = self._select_foreign_results_for_persistence(foreign_results)
+        if not foreign_results:
+            return
+
         documents = []
         embeddings = self.embedding_function([result['content'] for result in foreign_results], 'search_document')
         for i, result in enumerate(foreign_results):
@@ -270,39 +397,49 @@ class TavilyHybridClient():
 
         self.database_provider.insert_provider(self, documents)
 
-    def _search_oracle_freshness_cache(self, query, query_embeddings, max_results,
-                                       max_local, max_foreign, save_foreign,
-                                       **kwargs):
-        local_results = self.database_provider.search_provider(
-            self,
-            query_embeddings,
-            max_local,
-            query=query,
-            cache_ttl_seconds=self.cache_ttl_seconds
-        )
-        cache_results = [
-            result
-            for result in local_results
-            if result['score'] >= self.cache_score_threshold
-        ]
+    def _select_foreign_results_for_persistence(self, foreign_results):
+        candidates = []
+        for result in foreign_results:
+            if self.persist_score_threshold is not None:
+                score = result.get('score')
+                if score is None or score < self.persist_score_threshold:
+                    continue
+            candidates.append(result)
 
-        if cache_results:
-            return cache_results[:max_results]
+        if self.max_persisted_foreign is not None:
+            return candidates[:self.max_persisted_foreign]
 
-        foreign_results = self._search_tavily(query, max_foreign, **kwargs)
-        results = self._project_foreign_results(foreign_results)
-
-        if len(results) == 0:
-            return []
-
-        self._save_foreign_results(
-            foreign_results,
-            save_foreign,
-            max_foreign,
-            query,
-            cache_hit=False
-        )
-        return results[:max_results]
+        return candidates
 
     def ensure_oracle_vector_index(self, index_name=None):
         return oracle_database.ensure_vector_index(self, index_name=index_name)
+
+    def cleanup_cache(self, cache_ttl_seconds=None):
+        return oracle_database.delete_expired_cache_rows(
+            self,
+            cache_ttl_seconds=cache_ttl_seconds
+        )
+
+    def _maybe_cleanup_cache(self):
+        if not (self.db_provider == 'oracle' and self.auto_cleanup_cache):
+            return
+
+        now = monotonic()
+        if (
+            self._last_cache_cleanup_at is not None
+            and now - self._last_cache_cleanup_at < self.cache_cleanup_interval_seconds
+        ):
+            return
+
+        self.cleanup_cache()
+        self._last_cache_cleanup_at = now
+
+    def close(self):
+        if hasattr(self.tavily, "close"):
+            self.tavily.close()
+        if self._managed_oracle_connection is not None:
+            self._managed_oracle_connection.close()
+            self._managed_oracle_connection = None
+        if self._managed_mongo_client is not None:
+            self._managed_mongo_client.close()
+            self._managed_mongo_client = None

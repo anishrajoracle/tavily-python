@@ -1,12 +1,18 @@
 import array
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
+import hashlib
 import json
 
 from tavily.databases.oracle_config import (
     ORACLE_CACHE_HIT_FIELD,
+    ORACLE_CONTENT_HASH_FIELD,
+    ORACLE_EXPIRES_AT_FIELD,
     ORACLE_IDENTIFIER,
     ORACLE_INSERTED_FROM_FIELD,
+    ORACLE_LAST_SEEN_AT_FIELD,
+    ORACLE_MEMORY_SCOPE_FIELD,
     ORACLE_PROVIDER_NAME_FIELD,
+    ORACLE_QUERY_COUNT_FIELD,
     ORACLE_RAW_PAYLOAD_FIELD,
     ORACLE_RETRIEVAL_MODE_FIELD,
     ORACLE_RETRIEVAL_QUERY_FIELD,
@@ -24,13 +30,14 @@ def validate_client(_client):
 
 
 def search_provider(client, query_embeddings, max_local, query=None,
-                    cache_ttl_seconds=None):
+                    cache_ttl_seconds=None, memory_scopes=None):
     return search(
         client,
         query_embeddings,
         max_local,
         query=query,
-        cache_ttl_seconds=cache_ttl_seconds
+        cache_ttl_seconds=cache_ttl_seconds,
+        memory_scopes=memory_scopes
     )
 
 
@@ -123,6 +130,24 @@ def validate_insert_schema(client, normalized_documents):
             "JSON-compatible"
         )
 
+    for text_column in (
+        ORACLE_SOURCE_URL_FIELD,
+        ORACLE_SOURCE_TITLE_FIELD,
+        ORACLE_RETRIEVAL_QUERY_FIELD,
+        ORACLE_RETRIEVAL_MODE_FIELD,
+        ORACLE_INSERTED_FROM_FIELD,
+        ORACLE_PROVIDER_NAME_FIELD,
+        ORACLE_CONTENT_HASH_FIELD,
+    ):
+        if text_column in insert_columns:
+            _validate_column_type(
+                client.table_name,
+                text_column,
+                table_columns[text_column],
+                _is_text_type,
+                "text-compatible"
+            )
+
     if ORACLE_RETRIEVAL_TIMESTAMP_FIELD in insert_columns:
         _validate_column_type(
             client.table_name,
@@ -130,6 +155,34 @@ def validate_insert_schema(client, normalized_documents):
             table_columns[ORACLE_RETRIEVAL_TIMESTAMP_FIELD],
             _is_timestamp_type,
             "timestamp-compatible"
+        )
+
+    for timestamp_column in (ORACLE_EXPIRES_AT_FIELD, ORACLE_LAST_SEEN_AT_FIELD):
+        if timestamp_column in insert_columns:
+            _validate_column_type(
+                client.table_name,
+                timestamp_column,
+                table_columns[timestamp_column],
+                _is_timestamp_type,
+                "timestamp-compatible"
+            )
+
+    if ORACLE_MEMORY_SCOPE_FIELD in insert_columns:
+        _validate_column_type(
+            client.table_name,
+            ORACLE_MEMORY_SCOPE_FIELD,
+            table_columns[ORACLE_MEMORY_SCOPE_FIELD],
+            _is_text_type,
+            "text-compatible"
+        )
+
+    if ORACLE_QUERY_COUNT_FIELD in insert_columns:
+        _validate_column_type(
+            client.table_name,
+            ORACLE_QUERY_COUNT_FIELD,
+            table_columns[ORACLE_QUERY_COUNT_FIELD],
+            _is_number_type,
+            "number-compatible"
         )
 
 
@@ -163,7 +216,18 @@ def _is_timestamp_type(data_type):
     return data_type == "DATE" or data_type.startswith("TIMESTAMP")
 
 
-def search(client, query_embeddings, max_local, query=None, cache_ttl_seconds=None):
+def _is_number_type(data_type):
+    return (
+        data_type == "NUMBER"
+        or data_type.startswith("INTEGER")
+        or data_type.startswith("BINARY_FLOAT")
+        or data_type.startswith("BINARY_DOUBLE")
+        or data_type.startswith("FLOAT")
+    )
+
+
+def search(client, query_embeddings, max_local, query=None, cache_ttl_seconds=None,
+           memory_scopes=None):
     limit = int(max_local)
     if limit < 1:
         return []
@@ -174,7 +238,8 @@ def search(client, query_embeddings, max_local, query=None, cache_ttl_seconds=No
             query_embeddings,
             max_local,
             query,
-            cache_ttl_seconds=cache_ttl_seconds
+            cache_ttl_seconds=cache_ttl_seconds,
+            memory_scopes=memory_scopes
         )
 
     execute_kwargs = {"query_vector": to_vector(query_embeddings)}
@@ -184,6 +249,7 @@ def search(client, query_embeddings, max_local, query=None, cache_ttl_seconds=No
         execute_kwargs
     )
     metadata_filter = build_metadata_filter(client.oracle_metadata_filters, execute_kwargs)
+    memory_scope_filter = build_memory_scope_filter(memory_scopes, execute_kwargs)
 
     sql = f"""
             SELECT {client.content_field},
@@ -193,6 +259,7 @@ def search(client, query_embeddings, max_local, query=None, cache_ttl_seconds=No
             WHERE {client.embeddings_field} IS NOT NULL
               {freshness_filter}
               {metadata_filter}
+              {memory_scope_filter}
             ORDER BY VECTOR_DISTANCE({client.embeddings_field}, :query_vector, COSINE)
             FETCH FIRST {limit} ROWS ONLY
         """
@@ -210,7 +277,7 @@ def search(client, query_embeddings, max_local, query=None, cache_ttl_seconds=No
 
 
 def search_native_hybrid(client, query_embeddings, max_local, query,
-                         cache_ttl_seconds=None):
+                         cache_ttl_seconds=None, memory_scopes=None):
     limit = int(max_local)
     if limit < 1:
         return []
@@ -225,6 +292,7 @@ def search_native_hybrid(client, query_embeddings, max_local, query,
         execute_kwargs
     )
     metadata_filter = build_metadata_filter(client.oracle_metadata_filters, execute_kwargs)
+    memory_scope_filter = build_memory_scope_filter(memory_scopes, execute_kwargs)
 
     sql = f"""
             WITH vector_candidates AS (
@@ -235,6 +303,7 @@ def search_native_hybrid(client, query_embeddings, max_local, query,
                 WHERE {client.embeddings_field} IS NOT NULL
                   {freshness_filter}
                   {metadata_filter}
+                  {memory_scope_filter}
                 ORDER BY VECTOR_DISTANCE({client.embeddings_field}, :query_vector, COSINE)
                 FETCH FIRST {limit} ROWS ONLY
             ),
@@ -247,6 +316,7 @@ def search_native_hybrid(client, query_embeddings, max_local, query,
                   AND CONTAINS({client.content_field}, :text_query, 1) > 0
                   {freshness_filter}
                   {metadata_filter}
+                  {memory_scope_filter}
                 ORDER BY SCORE(1) DESC
                 FETCH FIRST {limit} ROWS ONLY
             ),
@@ -324,8 +394,30 @@ def build_metadata_filter(oracle_metadata_filters, execute_kwargs):
     return "AND " + " AND ".join(clauses)
 
 
+def build_memory_scope_filter(memory_scopes, execute_kwargs):
+    if not memory_scopes:
+        return ""
+
+    scopes = list(memory_scopes)
+    if not scopes:
+        return ""
+
+    bind_names = []
+    for i, scope in enumerate(scopes):
+        bind_name = f"memory_scope_{i}"
+        bind_names.append(f":{bind_name}")
+        execute_kwargs[bind_name] = scope
+
+    return f"AND {ORACLE_MEMORY_SCOPE_FIELD} IN ({', '.join(bind_names)})"
+
+
 def build_persistence_metadata(client, result, query, cache_hit):
-    if not (client.enable_oracle_json_payload or client.enable_provenance_metadata):
+    if not (
+        client.enable_oracle_json_payload
+        or client.enable_provenance_metadata
+        or client.enable_oracle_memory_metadata
+        or client.oracle_upsert_key is not None
+    ):
         return {}
 
     timestamp = datetime.now(timezone.utc)
@@ -362,7 +454,26 @@ def build_persistence_metadata(client, result, query, cache_hit):
             ORACLE_PROVIDER_NAME_FIELD: "tavily",
         })
 
+    if client.enable_oracle_memory_metadata:
+        metadata.update({
+            ORACLE_MEMORY_SCOPE_FIELD: client.persistence_depth,
+            ORACLE_EXPIRES_AT_FIELD: timestamp + timedelta(seconds=client.cache_ttl_seconds),
+            ORACLE_LAST_SEEN_AT_FIELD: timestamp,
+            ORACLE_QUERY_COUNT_FIELD: 1,
+        })
+
+    if client.oracle_upsert_key == "source_url" and result.get("url"):
+        metadata[ORACLE_SOURCE_URL_FIELD] = result["url"]
+    elif client.oracle_upsert_key == "content_hash":
+        content = result.get("content")
+        if content:
+            metadata[ORACLE_CONTENT_HASH_FIELD] = build_content_hash(content)
+
     return metadata
+
+
+def build_content_hash(content):
+    return hashlib.sha256(str(content).encode("utf-8")).hexdigest()
 
 
 def filter_duplicate_documents(client, documents):
@@ -486,6 +597,17 @@ def insert_documents(client, documents):
     if not documents:
         return
 
+    normalized_documents, column_names = normalize_documents(client, documents)
+    validate_insert_schema(client, normalized_documents)
+
+    if client.oracle_upsert_key is not None:
+        upsert_documents(client, normalized_documents, column_names)
+        return
+
+    insert_normalized_documents(client, normalized_documents, column_names)
+
+
+def normalize_documents(client, documents):
     normalized_documents = []
     column_names = set()
 
@@ -509,8 +631,10 @@ def insert_documents(client, documents):
 
         normalized_documents.append(normalized_document)
 
-    validate_insert_schema(client, normalized_documents)
+    return normalized_documents, column_names
 
+
+def insert_normalized_documents(client, normalized_documents, column_names):
     ordered_columns = sorted(column_names)
     columns = ", ".join(ordered_columns)
     placeholders = ", ".join(f":{column}" for column in ordered_columns)
@@ -523,3 +647,98 @@ def insert_documents(client, documents):
     with client.connection.cursor() as cursor:
         cursor.executemany(sql, rows)
     client.connection.commit()
+
+
+def upsert_documents(client, normalized_documents, column_names):
+    key_column = upsert_key_column(client.oracle_upsert_key)
+    upsertable_documents = [
+        document for document in normalized_documents
+        if document.get(key_column)
+    ]
+    insert_only_documents = [
+        document for document in normalized_documents
+        if not document.get(key_column)
+    ]
+
+    if insert_only_documents:
+        insert_normalized_documents(client, insert_only_documents, column_names)
+
+    if not upsertable_documents:
+        return
+
+    ordered_columns = sorted(column_names)
+    update_columns = [column for column in ordered_columns if column != key_column]
+    update_assignments = [
+        build_upsert_update_assignment(column)
+        for column in update_columns
+    ]
+    insert_columns = ", ".join(ordered_columns)
+    insert_values = ", ".join(f":{column}" for column in ordered_columns)
+
+    sql = f"""
+        MERGE INTO {client.table_name} target
+        USING (SELECT :{key_column} AS {key_column} FROM DUAL) source
+        ON (target.{key_column} = source.{key_column})
+        WHEN MATCHED THEN UPDATE SET {', '.join(update_assignments)}
+        WHEN NOT MATCHED THEN INSERT ({insert_columns})
+        VALUES ({insert_values})
+    """
+    rows = [
+        {column: document.get(column) for column in ordered_columns}
+        for document in upsertable_documents
+    ]
+
+    with client.connection.cursor() as cursor:
+        for row in rows:
+            cursor.execute(sql, **row)
+    client.connection.commit()
+
+
+def upsert_key_column(oracle_upsert_key):
+    if oracle_upsert_key == "source_url":
+        return ORACLE_SOURCE_URL_FIELD
+    if oracle_upsert_key == "content_hash":
+        return ORACLE_CONTENT_HASH_FIELD
+    raise ValueError("oracle_upsert_key must be 'source_url' or 'content_hash'.")
+
+
+def build_upsert_update_assignment(column):
+    if column == ORACLE_QUERY_COUNT_FIELD:
+        return f"target.{column} = NVL(target.{column}, 0) + 1"
+    return f"target.{column} = :{column}"
+
+
+def delete_expired_cache_rows(client, cache_ttl_seconds=None):
+    if client.db_provider != "oracle":
+        raise ValueError("cleanup_cache is only supported when db_provider='oracle'.")
+
+    table_columns = fetch_table_columns(client)
+    execute_kwargs = {}
+    if (
+        ORACLE_EXPIRES_AT_FIELD in table_columns
+        and ORACLE_MEMORY_SCOPE_FIELD in table_columns
+    ):
+        sql = f"""
+            DELETE FROM {client.table_name}
+            WHERE {ORACLE_MEMORY_SCOPE_FIELD} = :memory_scope
+              AND {ORACLE_EXPIRES_AT_FIELD} < SYSTIMESTAMP
+        """
+        execute_kwargs["memory_scope"] = "cache_only"
+    else:
+        ttl_seconds = client.cache_ttl_seconds if cache_ttl_seconds is None else cache_ttl_seconds
+        if ttl_seconds <= 0:
+            raise ValueError("cache_ttl_seconds must be greater than 0.")
+        sql = f"""
+            DELETE FROM {client.table_name}
+            WHERE {client.cache_timestamp_field} <
+                  CAST(SYSTIMESTAMP AS TIMESTAMP) -
+                  NUMTODSINTERVAL(:cache_ttl_seconds, 'SECOND')
+        """
+        execute_kwargs["cache_ttl_seconds"] = ttl_seconds
+
+    with client.connection.cursor() as cursor:
+        cursor.execute(sql, **execute_kwargs)
+        deleted_rows = cursor.rowcount
+
+    client.connection.commit()
+    return deleted_rows

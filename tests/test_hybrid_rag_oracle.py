@@ -17,18 +17,26 @@ DEFAULT_SCHEMA_ROWS = [
     ("CACHE_HIT", "NUMBER"),
     ("INSERTED_FROM", "VARCHAR2"),
     ("PROVIDER_NAME", "VARCHAR2"),
+    ("MEMORY_SCOPE", "VARCHAR2"),
+    ("EXPIRES_AT", "TIMESTAMP WITH TIME ZONE"),
+    ("LAST_SEEN_AT", "TIMESTAMP WITH TIME ZONE"),
+    ("QUERY_COUNT", "NUMBER"),
+    ("CONTENT_HASH", "VARCHAR2"),
 ]
 
 
 class FakeCursor:
-    def __init__(self, rows=None, schema_rows=None, fetchone_results=None):
+    def __init__(self, rows=None, rows_sequence=None, schema_rows=None,
+                 fetchone_results=None, rowcount=0):
         self.executed = None
         self.executed_calls = []
         self.executemany_call = None
         self.rows = rows
+        self.rows_sequence = list(rows_sequence or [])
         self.schema_rows = schema_rows
         self.active_rows = None
         self.fetchone_results = fetchone_results or []
+        self.rowcount = rowcount
 
         if self.rows is None:
             self.rows = [("local content", 0.75, "local")]
@@ -46,6 +54,8 @@ class FakeCursor:
         self.executed_calls.append((sql, kwargs))
         if "USER_TAB_COLUMNS" in sql:
             self.active_rows = self.schema_rows
+        elif self.rows_sequence:
+            self.active_rows = self.rows_sequence.pop(0)
         else:
             self.active_rows = self.rows
 
@@ -62,11 +72,14 @@ class FakeCursor:
 
 
 class FakeConnection:
-    def __init__(self, rows=None, schema_rows=None, fetchone_results=None):
+    def __init__(self, rows=None, rows_sequence=None, schema_rows=None,
+                 fetchone_results=None, rowcount=0):
         self.cursor_instance = FakeCursor(
             rows=rows,
+            rows_sequence=rows_sequence,
             schema_rows=schema_rows,
             fetchone_results=fetchone_results,
+            rowcount=rowcount,
         )
         self.committed = False
 
@@ -78,11 +91,14 @@ class FakeConnection:
 
 
 class FakeTavilyClient:
-    def __init__(self):
+    def __init__(self, results=None):
         self.calls = []
+        self.results = results
 
     def search(self, *_args, **_kwargs):
         self.calls.append((_args, _kwargs))
+        if self.results is not None:
+            return {"results": self.results}
         return {
             "results": [
                 {
@@ -346,6 +362,252 @@ def test_oracle_freshness_cache_miss_calls_tavily_and_saves_foreign_results():
     assert rows[0]["EMBEDDINGS"].typecode == "f"
     assert list(rows[0]["EMBEDDINGS"]) == pytest.approx([0.7, 0.8, 0.9])
     assert connection.committed is True
+
+
+def test_oracle_cache_then_memory_cache_hit_skips_memory_and_tavily():
+    connection = FakeConnection(rows=[("fresh cache content", 0.86, "local")])
+    client = TavilyHybridClient(
+        api_key="tvly-test",
+        db_provider="oracle",
+        connection=connection,
+        table_name="tavily_documents",
+        retrieval_mode="cache_then_memory",
+        cache_ttl_seconds=300,
+        cache_score_threshold=0.8,
+        memory_score_threshold=0.6,
+        embedding_function=lambda texts, _: [[0.1, 0.2, 0.3] for _ in texts],
+        ranking_function=failing_ranking_function,
+    )
+    client.tavily = FailingTavilyClient()
+
+    results = client.search(
+        "test query",
+        max_results=2,
+        max_local=1,
+        max_foreign=1,
+        save_foreign=True,
+    )
+
+    assert len(connection.cursor_instance.executed_calls) == 1
+    assert connection.cursor_instance.executemany_call is None
+    assert results == [
+        {"content": "fresh cache content", "score": 0.86, "origin": "local"}
+    ]
+
+
+def test_oracle_cache_then_memory_memory_hit_skips_tavily_after_cache_miss():
+    connection = FakeConnection(rows_sequence=[
+        [("low score cache content", 0.2, "local")],
+        [("durable memory content", 0.72, "local")],
+    ])
+    client = TavilyHybridClient(
+        api_key="tvly-test",
+        db_provider="oracle",
+        connection=connection,
+        table_name="tavily_documents",
+        retrieval_mode="cache_then_memory",
+        cache_ttl_seconds=300,
+        cache_score_threshold=0.8,
+        memory_score_threshold=0.6,
+        memory_max_results=3,
+        embedding_function=lambda texts, _: [[0.1, 0.2, 0.3] for _ in texts],
+        ranking_function=failing_ranking_function,
+    )
+    client.tavily = FailingTavilyClient()
+
+    results = client.search(
+        "test query",
+        max_results=2,
+        max_local=1,
+        max_foreign=1,
+        save_foreign=True,
+    )
+
+    assert len(connection.cursor_instance.executed_calls) == 2
+    assert "FETCH FIRST 3 ROWS ONLY" in connection.cursor_instance.executed_calls[1][0]
+    assert connection.cursor_instance.executemany_call is None
+    assert results == [
+        {"content": "durable memory content", "score": 0.72, "origin": "local"}
+    ]
+
+
+def test_oracle_cache_then_memory_miss_calls_tavily_and_saves_memory_metadata():
+    connection = FakeConnection(rows_sequence=[
+        [],
+        [],
+    ])
+    client = TavilyHybridClient(
+        api_key="tvly-test",
+        db_provider="oracle",
+        connection=connection,
+        table_name="tavily_documents",
+        retrieval_mode="cache_then_memory",
+        cache_ttl_seconds=300,
+        cache_score_threshold=0.8,
+        memory_score_threshold=0.6,
+        persistence_depth="cache_plus_memory",
+        enable_oracle_memory_metadata=True,
+        embedding_function=lambda texts, _: [[0.7, 0.8, 0.9] for _ in texts],
+        ranking_function=failing_ranking_function,
+    )
+    client.tavily = FakeTavilyClient()
+
+    results = client.search(
+        "test query",
+        max_results=1,
+        max_local=1,
+        max_foreign=1,
+        save_foreign=True,
+    )
+
+    sql, rows = connection.cursor_instance.executemany_call
+    row = rows[0]
+    assert len(client.tavily.calls) == 1
+    assert "MEMORY_SCOPE" in sql
+    assert row["MEMORY_SCOPE"] == "cache_plus_memory"
+    assert row["EXPIRES_AT"] > row["LAST_SEEN_AT"]
+    assert row["QUERY_COUNT"] == 1
+    assert results == [
+        {"content": "foreign oracle content", "score": 0.91, "origin": "foreign"}
+    ]
+    assert connection.committed is True
+
+
+def test_oracle_save_foreign_respects_persistence_limit_and_score_threshold():
+    connection = FakeConnection(rows=[])
+    client = TavilyHybridClient(
+        api_key="tvly-test",
+        db_provider="oracle",
+        connection=connection,
+        table_name="tavily_documents",
+        max_persisted_foreign=1,
+        persist_score_threshold=0.8,
+        embedding_function=lambda texts, _: [[0.7, 0.8, 0.9] for _ in texts],
+        ranking_function=lambda _, documents, __: documents,
+    )
+    client.tavily = FakeTavilyClient(results=[
+        {"content": "persisted content", "score": 0.95},
+        {"content": "low score content", "score": 0.7},
+        {"content": "also high content", "score": 0.9},
+    ])
+
+    results = client.search(
+        "test query",
+        max_results=3,
+        max_local=0,
+        max_foreign=3,
+        save_foreign=True,
+    )
+
+    _, rows = connection.cursor_instance.executemany_call
+    assert len(results) == 3
+    assert len(rows) == 1
+    assert rows[0]["CONTENT"] == "persisted content"
+
+
+def test_oracle_source_url_upsert_uses_merge_without_requiring_provenance_flag():
+    connection = FakeConnection(rows=[])
+    client = TavilyHybridClient(
+        api_key="tvly-test",
+        db_provider="oracle",
+        connection=connection,
+        table_name="tavily_documents",
+        oracle_upsert_key="source_url",
+        embedding_function=lambda texts, _: [[0.7, 0.8, 0.9] for _ in texts],
+        ranking_function=lambda _, documents, __: documents,
+    )
+    client.tavily = FakeTavilyClient()
+
+    client.search(
+        "test query",
+        max_local=0,
+        max_foreign=1,
+        save_foreign=True,
+    )
+
+    sql, kwargs = connection.cursor_instance.executed_calls[-1]
+    assert connection.cursor_instance.executemany_call is None
+    assert "MERGE INTO TAVILY_DOCUMENTS target" in sql
+    assert "ON (target.SOURCE_URL = source.SOURCE_URL)" in sql
+    assert kwargs["SOURCE_URL"] == "https://example.com/oracle"
+    assert connection.committed is True
+
+
+def test_oracle_content_hash_upsert_adds_stable_hash_key():
+    connection = FakeConnection(rows=[])
+    client = TavilyHybridClient(
+        api_key="tvly-test",
+        db_provider="oracle",
+        connection=connection,
+        table_name="tavily_documents",
+        oracle_upsert_key="content_hash",
+        embedding_function=lambda texts, _: [[0.7, 0.8, 0.9] for _ in texts],
+        ranking_function=lambda _, documents, __: documents,
+    )
+    client.tavily = FakeTavilyClient()
+
+    client.search(
+        "test query",
+        max_local=0,
+        max_foreign=1,
+        save_foreign=True,
+    )
+
+    sql, kwargs = connection.cursor_instance.executed_calls[-1]
+    assert "ON (target.CONTENT_HASH = source.CONTENT_HASH)" in sql
+    assert len(kwargs["CONTENT_HASH"]) == 64
+
+
+def test_oracle_cleanup_cache_deletes_expired_cache_only_rows():
+    connection = FakeConnection(rowcount=2)
+    client = TavilyHybridClient(
+        api_key="tvly-test",
+        db_provider="oracle",
+        connection=connection,
+        table_name="tavily_documents",
+        embedding_function=lambda texts, _: [[0.1, 0.2, 0.3]],
+        ranking_function=lambda _, documents, __: documents,
+    )
+
+    deleted_rows = client.cleanup_cache()
+
+    sql, kwargs = connection.cursor_instance.executed_calls[-1]
+    assert deleted_rows == 2
+    assert "DELETE FROM TAVILY_DOCUMENTS" in sql
+    assert "MEMORY_SCOPE = :memory_scope" in sql
+    assert "EXPIRES_AT < SYSTIMESTAMP" in sql
+    assert kwargs["memory_scope"] == "cache_only"
+    assert connection.committed is True
+
+
+def test_oracle_auto_cleanup_runs_before_search_once_per_interval():
+    connection = FakeConnection(rowcount=2)
+    client = TavilyHybridClient(
+        api_key="tvly-test",
+        db_provider="oracle",
+        connection=connection,
+        table_name="tavily_documents",
+        auto_cleanup_cache=True,
+        cache_cleanup_interval_seconds=3600,
+        embedding_function=lambda texts, _: [[0.1, 0.2, 0.3]],
+        ranking_function=lambda _, documents, __: documents,
+    )
+
+    client.search("test query", max_local=1, max_foreign=0)
+    client.search("test query", max_local=1, max_foreign=0)
+
+    delete_calls = [
+        (sql, kwargs)
+        for sql, kwargs in connection.cursor_instance.executed_calls
+        if "DELETE FROM TAVILY_DOCUMENTS" in sql
+    ]
+    vector_search_calls = [
+        sql for sql, _ in connection.cursor_instance.executed_calls
+        if "VECTOR_DISTANCE(EMBEDDINGS, :query_vector, COSINE)" in sql
+    ]
+    assert len(delete_calls) == 1
+    assert len(vector_search_calls) == 2
+    assert delete_calls[0][1]["memory_scope"] == "cache_only"
 
 
 def test_oracle_save_foreign_inserts_tavily_results():

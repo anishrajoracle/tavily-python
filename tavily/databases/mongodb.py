@@ -49,7 +49,7 @@ def validate_client(client):
 
 
 def search_provider(client, query_embeddings, max_local,
-                    query=None, cache_ttl_seconds=None):
+                    query=None, cache_ttl_seconds=None, memory_scopes=None):
     return search(
         client.collection,
         client.index,
