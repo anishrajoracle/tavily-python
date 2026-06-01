@@ -57,6 +57,112 @@ def read_lob(value):
     return value
 
 
+def fetch_table_columns(client):
+    cached_columns = getattr(client, "_oracle_table_columns_cache", None)
+    if cached_columns is not None:
+        return cached_columns
+
+    sql = """
+        SELECT COLUMN_NAME, DATA_TYPE
+        FROM USER_TAB_COLUMNS
+        WHERE TABLE_NAME = :table_name
+    """
+    with client.connection.cursor() as cursor:
+        cursor.execute(sql, table_name=client.table_name)
+        columns = {
+            validate_identifier(row[0], "column name"): str(row[1]).upper()
+            for row in cursor.fetchall()
+        }
+
+    client._oracle_table_columns_cache = columns
+    return columns
+
+
+def validate_insert_schema(client, normalized_documents):
+    if not normalized_documents:
+        return
+
+    table_columns = fetch_table_columns(client)
+    if not table_columns:
+        raise ValueError(
+            f"Oracle table {client.table_name} was not found or has no visible columns."
+        )
+
+    insert_columns = set()
+    for document in normalized_documents:
+        insert_columns.update(document.keys())
+
+    missing_columns = sorted(insert_columns - set(table_columns.keys()))
+    if missing_columns:
+        raise ValueError(
+            f"Oracle table {client.table_name} is missing columns required for "
+            f"save_foreign inserts: {', '.join(missing_columns)}."
+        )
+
+    _validate_column_type(
+        client.table_name,
+        client.content_field,
+        table_columns[client.content_field],
+        _is_text_type,
+        "text-compatible"
+    )
+    _validate_column_type(
+        client.table_name,
+        client.embeddings_field,
+        table_columns[client.embeddings_field],
+        _is_vector_type,
+        "VECTOR-compatible"
+    )
+
+    if ORACLE_RAW_PAYLOAD_FIELD in insert_columns:
+        _validate_column_type(
+            client.table_name,
+            ORACLE_RAW_PAYLOAD_FIELD,
+            table_columns[ORACLE_RAW_PAYLOAD_FIELD],
+            _is_json_storage_type,
+            "JSON-compatible"
+        )
+
+    if ORACLE_RETRIEVAL_TIMESTAMP_FIELD in insert_columns:
+        _validate_column_type(
+            client.table_name,
+            ORACLE_RETRIEVAL_TIMESTAMP_FIELD,
+            table_columns[ORACLE_RETRIEVAL_TIMESTAMP_FIELD],
+            _is_timestamp_type,
+            "timestamp-compatible"
+        )
+
+
+def _validate_column_type(table_name, column_name, data_type, predicate, expected):
+    if not predicate(data_type):
+        raise ValueError(
+            f"Oracle column {table_name}.{column_name} must be {expected}; "
+            f"found {data_type}."
+        )
+
+
+def _is_vector_type(data_type):
+    return data_type.startswith("VECTOR")
+
+
+def _is_text_type(data_type):
+    return (
+        data_type in {"CLOB", "NCLOB", "LONG"}
+        or data_type.startswith("VARCHAR")
+        or data_type.startswith("NVARCHAR")
+        or data_type.startswith("CHAR")
+        or data_type.startswith("NCHAR")
+    )
+
+
+def _is_json_storage_type(data_type):
+    return _is_text_type(data_type) or data_type in {"JSON", "BLOB"}
+
+
+def _is_timestamp_type(data_type):
+    return data_type == "DATE" or data_type.startswith("TIMESTAMP")
+
+
 def search(client, query_embeddings, max_local, query=None, cache_ttl_seconds=None):
     limit = int(max_local)
     if limit < 1:
@@ -402,6 +508,8 @@ def insert_documents(client, documents):
             column_names.add(column_name)
 
         normalized_documents.append(normalized_document)
+
+    validate_insert_schema(client, normalized_documents)
 
     ordered_columns = sorted(column_names)
     columns = ", ".join(ordered_columns)

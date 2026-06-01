@@ -175,6 +175,7 @@ The default `save_foreign=True` Oracle document includes only the configured con
 | Hybrid retrieval | `retrieval_mode="hybrid_search"`. | Local plus foreign results are reranked by the configured ranking function. |
 | Freshness cache lifecycle | `_search_oracle_freshness_cache(...)`. | TTL and score threshold determine cache hits. |
 | Oracle persistence workflow | `_save_foreign_results(...)` and `tavily.databases.oracledb.insert_provider(...)`. | Triggered by `save_foreign=True` or a custom `save_foreign` callable. |
+| Oracle insert schema validation | `tavily.databases.oracledb.validate_insert_schema(...)`. | Checks target columns and conservative type compatibility before `executemany(...)`. |
 | Semantic deduplication | `tavily.databases.oracledb.filter_duplicate_documents(...)` and `is_duplicate(...)`. | Enabled only when `dedup_similarity_threshold` is set. |
 | Native Oracle hybrid search | `tavily.databases.oracledb.search_native_hybrid(...)`. | Requires an Oracle Text index on the content column. |
 | Vector index lifecycle | `ensure_oracle_vector_index(...)`. | Explicit helper; it does not run automatically. |
@@ -189,6 +190,7 @@ The default `save_foreign=True` Oracle document includes only the configured con
 | Oracle native hybrid SQL | `tavily/databases/oracledb.py`, `search_native_hybrid`. |
 | Freshness cache flow | `tavily/hybrid_rag/hybrid_rag.py`, `_search_oracle_freshness_cache`. |
 | JSON and provenance metadata | `tavily/databases/oracledb.py`, `build_persistence_metadata`. |
+| Insert schema validation | `tavily/databases/oracledb.py`, `fetch_table_columns` and `validate_insert_schema`. |
 | Deduplication | `tavily/databases/oracledb.py`, `filter_duplicate_documents` and `is_duplicate`. |
 | Vector index helper | `tavily/hybrid_rag/hybrid_rag.py`, `ensure_oracle_vector_index`. |
 | Oracle examples | `examples/oracle_tavily.ipynb`. |
@@ -200,7 +202,7 @@ The audit suggested possible convenience APIs such as `ensure_schema()`, `store_
 
 | Suggested API | Existing workflow |
 | --- | --- |
-| `ensure_schema()` | Schema remains application-managed. `ensure_oracle_vector_index()` exists for the vector index lifecycle. |
+| `ensure_schema()` | Schema remains application-managed. `ensure_oracle_vector_index()` exists for the vector index lifecycle, and insert-time schema validation fails early when required columns or compatible types are missing. |
 | `store_results()` | Use `search(..., save_foreign=True)` or `search(..., save_foreign=callable)`. |
 | `retrieve_cached()` | Use `retrieval_mode="freshness_cache"` and `search(...)`. |
 | `retrieve_memory()` | Use `retrieval_mode="hybrid_search"` and, for Oracle-only memory lookup, `search(..., max_foreign=0)`. |

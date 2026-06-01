@@ -4,16 +4,36 @@ from tavily import TavilyHybridClient
 from tavily.databases import oracledb as oracle_database
 
 
+DEFAULT_SCHEMA_ROWS = [
+    ("CONTENT", "CLOB"),
+    ("EMBEDDINGS", "VECTOR"),
+    ("SITE_URL", "VARCHAR2"),
+    ("RAW_PAYLOAD", "CLOB"),
+    ("SOURCE_URL", "VARCHAR2"),
+    ("SOURCE_TITLE", "VARCHAR2"),
+    ("RETRIEVAL_QUERY", "VARCHAR2"),
+    ("RETRIEVAL_TIMESTAMP", "TIMESTAMP WITH TIME ZONE"),
+    ("RETRIEVAL_MODE", "VARCHAR2"),
+    ("CACHE_HIT", "NUMBER"),
+    ("INSERTED_FROM", "VARCHAR2"),
+    ("PROVIDER_NAME", "VARCHAR2"),
+]
+
+
 class FakeCursor:
-    def __init__(self, rows=None, fetchone_results=None):
+    def __init__(self, rows=None, schema_rows=None, fetchone_results=None):
         self.executed = None
         self.executed_calls = []
         self.executemany_call = None
         self.rows = rows
+        self.schema_rows = schema_rows
+        self.active_rows = None
         self.fetchone_results = fetchone_results or []
 
         if self.rows is None:
             self.rows = [("local content", 0.75, "local")]
+        if self.schema_rows is None:
+            self.schema_rows = DEFAULT_SCHEMA_ROWS
 
     def __enter__(self):
         return self
@@ -24,12 +44,16 @@ class FakeCursor:
     def execute(self, sql, **kwargs):
         self.executed = (sql, kwargs)
         self.executed_calls.append((sql, kwargs))
+        if "USER_TAB_COLUMNS" in sql:
+            self.active_rows = self.schema_rows
+        else:
+            self.active_rows = self.rows
 
     def executemany(self, sql, rows):
         self.executemany_call = (sql, rows)
 
     def fetchall(self):
-        return self.rows
+        return self.active_rows if self.active_rows is not None else self.rows
 
     def fetchone(self):
         if self.fetchone_results:
@@ -38,9 +62,10 @@ class FakeCursor:
 
 
 class FakeConnection:
-    def __init__(self, rows=None, fetchone_results=None):
+    def __init__(self, rows=None, schema_rows=None, fetchone_results=None):
         self.cursor_instance = FakeCursor(
             rows=rows,
+            schema_rows=schema_rows,
             fetchone_results=fetchone_results,
         )
         self.committed = False
@@ -195,6 +220,59 @@ def test_oracle_save_foreign_can_store_json_payload_and_provenance_metadata():
     assert raw_payload
     assert '"provider_name": "tavily"' in raw_payload
     assert '"url": "https://example.com/oracle"' in raw_payload
+
+
+def test_oracle_insert_schema_validation_rejects_missing_columns():
+    schema_rows = [
+        ("CONTENT", "CLOB"),
+    ]
+    connection = FakeConnection(schema_rows=schema_rows)
+    client = TavilyHybridClient(
+        api_key="tvly-test",
+        db_provider="oracle",
+        connection=connection,
+        table_name="tavily_documents",
+        embedding_function=lambda texts, _: [[0.1, 0.2, 0.3]],
+        ranking_function=lambda _, documents, __: documents,
+    )
+
+    with pytest.raises(ValueError, match="missing columns.*EMBEDDINGS"):
+        oracle_database.insert_documents(client, [
+            {
+                "content": "foreign content",
+                "embeddings": [0.4, 0.5, 0.6],
+            }
+        ])
+
+    assert connection.cursor_instance.executemany_call is None
+    assert connection.committed is False
+
+
+def test_oracle_insert_schema_validation_rejects_wrong_vector_column_type():
+    schema_rows = [
+        ("CONTENT", "CLOB"),
+        ("EMBEDDINGS", "CLOB"),
+    ]
+    connection = FakeConnection(schema_rows=schema_rows)
+    client = TavilyHybridClient(
+        api_key="tvly-test",
+        db_provider="oracle",
+        connection=connection,
+        table_name="tavily_documents",
+        embedding_function=lambda texts, _: [[0.1, 0.2, 0.3]],
+        ranking_function=lambda _, documents, __: documents,
+    )
+
+    with pytest.raises(ValueError, match="EMBEDDINGS.*VECTOR-compatible"):
+        oracle_database.insert_documents(client, [
+            {
+                "content": "foreign content",
+                "embeddings": [0.4, 0.5, 0.6],
+            }
+        ])
+
+    assert connection.cursor_instance.executemany_call is None
+    assert connection.committed is False
 
 
 def test_oracle_freshness_cache_hit_skips_tavily_and_returns_local_results():
