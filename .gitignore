@@ -9,6 +9,8 @@ __pycache__/
 .pytest_cache/
 .mypy_cache/
 .ruff_cache/
+.ipynb_checkpoints/
+**/.ipynb_checkpoints/
 .coverage
 htmlcov/
 .tox/
