@@ -250,12 +250,13 @@ for chunk in stream:
 
 `TavilyHybridClient` can use MongoDB or OracleDB as a local vector store. MongoDB keeps the existing hybrid-search behavior only.
 
-OracleDB supports two retrieval modes:
+OracleDB supports three retrieval modes:
 
 - `retrieval_mode="hybrid_search"`: search Oracle first, search Tavily when `max_foreign > 0`, merge and rerank local plus foreign results, and optionally persist Tavily results with `save_foreign=True`.
 - `retrieval_mode="freshness_cache"`: Oracle-only. Search fresh Oracle rows first, return Oracle results when at least one row meets `cache_score_threshold`, and skip Tavily on that cache hit. On a cache miss, call Tavily, optionally persist Tavily results into Oracle, and return Tavily results.
+- `retrieval_mode="cache_then_memory"`: Oracle-only. Search fresh Oracle cache rows first, search durable Oracle memory rows next, and call Tavily only when both local tiers miss.
 
-Freshness-cache mode expects Oracle rows to have an `ADDED_AT` timestamp column, for example `ADDED_AT TIMESTAMP DEFAULT SYSTIMESTAMP`, so the client can apply `cache_ttl_seconds`.
+Freshness-cache and cache-then-memory modes expect Oracle rows to have an `ADDED_AT` timestamp column, for example `ADDED_AT TIMESTAMP DEFAULT SYSTIMESTAMP`, so the client can apply `cache_ttl_seconds`. Cache-then-memory can also use `MEMORY_SCOPE`, `EXPIRES_AT`, `LAST_SEEN_AT`, and `QUERY_COUNT` when `enable_oracle_memory_metadata=True`.
 
 ## Why Oracle
 
@@ -269,6 +270,7 @@ Oracle-specific value already implemented in this repository:
 | Native JSON storage | `enable_oracle_json_payload=True` can persist the raw Tavily payload and retrieval provenance into a JSON column. |
 | Hybrid retrieval | `enable_native_hybrid_search=True` combines Oracle Vector Search with Oracle Text scoring for local candidates. |
 | Persistent cache | `retrieval_mode="freshness_cache"` checks fresh Oracle rows before calling Tavily and can write Tavily misses back to Oracle. |
+| Cache then memory | `retrieval_mode="cache_then_memory"` checks fresh cache first, durable Oracle memory second, and Tavily last. |
 | Long-term memory | `retrieval_mode="hybrid_search"` can query persisted Oracle rows, combine them with fresh Tavily results, and rerank the merged set. |
 | Oracle reviewability | Optional provenance columns record source URL, source title, retrieval query, retrieval mode, cache-hit state, and provider. |
 | Semantic deduplication | `dedup_similarity_threshold` can skip near-duplicate Oracle inserts by comparing the nearest stored vector. |
@@ -299,13 +301,15 @@ Oracle Cache Lookup
 
 For `retrieval_mode="freshness_cache"`, the client embeds the query, searches Oracle rows inside the configured TTL window, and returns Oracle results when at least one local result meets `cache_score_threshold`. On a miss, it calls Tavily, optionally saves Tavily results when `save_foreign=True`, and returns the fresh Tavily results.
 
+For `retrieval_mode="cache_then_memory"`, the client performs the same freshness-cache check first. If that misses, it searches durable Oracle memory rows with `memory_score_threshold` and only calls Tavily when both local tiers miss.
+
 For `retrieval_mode="hybrid_search"`, the client searches Oracle local memory, calls Tavily when `max_foreign > 0`, projects both result sets into the existing result shape, reranks them with the configured ranking function, and optionally persists Tavily results.
 
 For a deeper architecture map, capability matrix, and implementation reference table, see [docs/oracle_architecture.md](docs/oracle_architecture.md).
 
 Example notebook:
 
-- `examples/oracle_tavily.ipynb` — Complete Oracle AI Database demo showing hybrid search, cache-only mode, VECTOR search, JSON provenance, semantic deduplication, and Tavily fallback.
+- `examples/oracle/oracle_tavily.ipynb` — Complete Oracle AI Database demo showing hybrid search, cache-only mode, cache-then-memory mode, VECTOR search, JSON provenance, semantic deduplication, and Tavily fallback.
 
 ```python
 from tavily import TavilyHybridClient
@@ -328,7 +332,20 @@ freshness_client = TavilyHybridClient(
     cache_score_threshold=0.75,
 )
 
-results = freshness_client.search(
+cache_then_memory_client = TavilyHybridClient(
+    api_key="tvly-YOUR_API_KEY",
+    db_provider="oracle",
+    connection=oracle_connection,
+    table_name="TAVILY_DOCUMENTS",
+    retrieval_mode="cache_then_memory",
+    cache_ttl_seconds=3600,
+    cache_score_threshold=0.75,
+    memory_score_threshold=0.65,
+    persistence_depth="cache_plus_memory",
+    enable_oracle_memory_metadata=True,
+)
+
+results = cache_then_memory_client.search(
     "latest Oracle Database vector search features",
     max_results=5,
     max_local=5,

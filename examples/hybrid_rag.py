@@ -1,9 +1,11 @@
 import os
-from pymongo import MongoClient
-from tavily import TavilyHybridClient
 from datetime import datetime
 
-db = MongoClient("MONGO_URI")["DATABASE_NAME"]
+from pymongo import MongoClient
+from pymongo.database import Database
+from tavily import TavilyHybridClient
+
+db: Database = MongoClient("MONGO_URI")["DATABASE_NAME"]
 
 hybrid_rag = TavilyHybridClient(
     api_key=os.environ["TAVILY_API_KEY"],
