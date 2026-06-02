@@ -258,6 +258,58 @@ OracleDB supports three retrieval modes:
 
 Freshness-cache and cache-then-memory modes expect Oracle rows to have an `ADDED_AT` timestamp column, for example `ADDED_AT TIMESTAMP DEFAULT SYSTIMESTAMP`, so the client can apply `cache_ttl_seconds`. Cache-then-memory can also use `MEMORY_SCOPE`, `EXPIRES_AT`, `LAST_SEEN_AT`, and `QUERY_COUNT` when `enable_oracle_memory_metadata=True`.
 
+## Connection Setup Differences (MongoDB vs Oracle)
+
+This section clarifies where each connection is created and what `TavilyHybridClient` expects to receive.
+
+| Provider | What your app creates first | What you pass into `TavilyHybridClient` | Who owns DB connection lifecycle |
+| --- | --- | --- | --- |
+| MongoDB | `MongoClient` and a target `collection` | `collection` and `index` | Your application |
+| Oracle | `oracledb.connect(...)` connection and target table | `connection` and `table_name` | Your application |
+
+Important behavior in the SDK constructor:
+
+- `TavilyHybridClient` always initializes its Tavily API client inside `__init__`.
+- `TavilyHybridClient` does not open MongoDB or Oracle DB connections for you.
+- Database handles must already exist before constructing `TavilyHybridClient`, for both providers.
+
+MongoDB setup pattern:
+
+```python
+from pymongo import MongoClient
+from tavily import TavilyHybridClient
+
+mongo = MongoClient("mongodb://localhost:27017")
+collection = mongo["my_db"]["my_collection"]
+
+client = TavilyHybridClient(
+    api_key="tvly-YOUR_API_KEY",
+    db_provider="mongodb",
+    collection=collection,
+    index="vector_index_name",
+)
+```
+
+Oracle setup pattern:
+
+```python
+import oracledb
+from tavily import TavilyHybridClient
+
+oracle_connection = oracledb.connect(
+    user="YOUR_USER",
+    password="YOUR_PASSWORD",
+    dsn="host:1521/service",
+)
+
+client = TavilyHybridClient(
+    api_key="tvly-YOUR_API_KEY",
+    db_provider="oracle",
+    connection=oracle_connection,
+    table_name="TAVILY_DOCUMENTS",
+)
+```
+
 ## Why Oracle
 
 The Oracle path in `TavilyHybridClient` is designed for applications that want Tavily web results to become durable retrieval context over time. Existing Oracle support is additive to the standard Tavily SDK and the MongoDB hybrid RAG workflow.
