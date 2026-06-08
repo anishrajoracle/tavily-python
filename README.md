@@ -269,6 +269,99 @@ for chunk in stream:
     print(chunk.decode('utf-8'))
 ```
 
+# Tavily Hybrid RAG
+
+`TavilyHybridClient` combines Tavily search with a local vector database. Tavily supplies fresh external results, while the local database stores reusable context for future retrieval.
+
+The Hybrid RAG API supports multiple database providers without requiring the SDK to own your database connection lifecycle.
+
+| Provider | Best for | Connection pattern |
+| --- | --- | --- |
+| MongoDB | Existing MongoDB Atlas/local vector-search workflows | Create a `MongoClient`, choose a collection, and pass the collection into `TavilyHybridClient`. |
+| OracleDB | Oracle-backed vector search, freshness cache, and memory workflows | Create an `oracledb` connection, choose a table, and pass the connection into `TavilyHybridClient`. |
+
+MongoDB example:
+
+```python
+from pymongo import MongoClient
+from tavily import TavilyHybridClient
+
+mongo = MongoClient("mongodb://localhost:27017")
+collection = mongo["my_db"]["my_collection"]
+
+client = TavilyHybridClient(
+    api_key="tvly-YOUR_API_KEY",
+    db_provider="mongodb",
+    collection=collection,
+    index="vector_index_name",
+)
+```
+
+OracleDB example:
+
+```python
+import oracledb
+from tavily import TavilyHybridClient
+
+connection = oracledb.connect(
+    user="YOUR_USER",
+    password="YOUR_PASSWORD",
+    dsn="host:1521/service",
+)
+
+client = TavilyHybridClient(
+    api_key="tvly-YOUR_API_KEY",
+    db_provider="oracle",
+    connection=connection,
+    table_name="TAVILY_DOCUMENTS",
+    retrieval_mode="hybrid_search",
+)
+```
+
+Provider-specific details live with the provider implementation:
+
+- OracleDB architecture, schema, cache/memory behavior, scoring notes, and notebook guide: [tavily/databases/oracledb/README.md](tavily/databases/oracledb/README.md)
+- Runnable Oracle examples: [examples/oracle](examples/oracle)
+- General deployment notes: [DEPLOYMENT.md](DEPLOYMENT.md)
+- Troubleshooting notes: [TROUBLESHOOTING.md](TROUBLESHOOTING.md)
+
+## Troubleshooting Guide
+
+Common setup issues are usually configuration-related:
+
+| Issue | Resolution |
+| --- | --- |
+| Missing Tavily API key | Set `TAVILY_API_KEY`, pass `api_key=...`, or provide a pre-authenticated custom session/client. |
+| Missing provider dependency | Install the optional provider extra, such as `python -m pip install -e ".[mongodb]"` or `python -m pip install -e ".[oracle]"`. |
+| Database connection failure | Verify the connection string, credentials, service name, network access, and local database status. |
+| Vector search errors | Confirm the target collection/table has compatible embedding data and the configured vector index/search fields match your schema. |
+| Insert/persistence errors | Confirm the provider schema contains the fields required by the options you enabled. |
+
+For Oracle-specific cache, memory, JSON, provenance, vector-index, and cleanup details, see [tavily/databases/oracledb/README.md](tavily/databases/oracledb/README.md).
+
+## Contributing Guide
+
+Contributors should preserve the existing public APIs and user workflows. Keep Tavily core APIs, database providers, cache behavior, retrieval behavior, persistence, hybrid search, deduplication, and vector search backward compatible.
+
+Local development basics:
+
+```bash
+python -m venv .venv
+source .venv/bin/activate
+python -m pip install --upgrade pip
+python -m pip install -e ".[oracle,mongodb]" pytest
+python -m pytest
+```
+
+Lightweight quality tooling is configured but intentionally conservative:
+
+```bash
+ruff check .
+mypy
+```
+
+See [CONTRIBUTING.md](CONTRIBUTING.md) for repository structure, coding standards, and pull request guidance.
+
 ## Advanced: Custom Session / Client Injection
 
 For enterprise environments that proxy Tavily traffic through an API gateway (e.g., for centralized auth, logging, or policy enforcement), you can pass a pre-configured HTTP session instead of a Tavily API key.

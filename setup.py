@@ -14,6 +14,10 @@ setup(
     long_description_content_type='text/markdown',
     packages=find_packages(exclude=['tests']),
     install_requires=['requests', 'tiktoken>=0.5.1', 'httpx'],
+    extras_require={
+        'oracle': ['oracledb'],
+        'mongodb': ['pymongo'],
+    },
     classifiers=[
         'Programming Language :: Python :: 3',
         'License :: OSI Approved :: MIT License',

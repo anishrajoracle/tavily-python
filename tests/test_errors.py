@@ -5,6 +5,7 @@ import asyncio
 import tavily.tavily as sync_tavily
 import tavily.async_tavily as async_tavily
 from tavily.errors import InvalidAPIKeyError
+from tests.request_intercept import clear_interceptor, intercept_requests
 
 @pytest.fixture
 def set_api_key():
@@ -44,9 +45,23 @@ def test_no_api_key_creates_keyless_client(clear_api_key):
         assert async_client._keyless is True
 
 def test_invalid_api_key():
-    with pytest.raises(InvalidAPIKeyError):
-        sync_tavily.TavilyClient(api_key="invalid_api_key").search("What is Tavily?")
+    sync_interceptor = intercept_requests(sync_tavily)
+    async_interceptor = intercept_requests(async_tavily)
+    sync_interceptor.set_response(
+        401,
+        json={"detail": {"error": "Invalid API key"}},
+    )
+    async_interceptor.set_response(
+        401,
+        json={"detail": {"error": "Invalid API key"}},
+    )
 
-    with pytest.raises(InvalidAPIKeyError):
-        print(async_tavily.httpx.AsyncClient.post)
-        print(asyncio.run(async_tavily.AsyncTavilyClient(api_key="invalid_api_key").search("What is Tavily?")))
+    try:
+        with pytest.raises(InvalidAPIKeyError):
+            sync_tavily.TavilyClient(api_key="invalid_api_key").search("What is Tavily?")
+
+        with pytest.raises(InvalidAPIKeyError):
+            asyncio.run(async_tavily.AsyncTavilyClient(api_key="invalid_api_key").search("What is Tavily?"))
+    finally:
+        clear_interceptor(sync_tavily)
+        clear_interceptor(async_tavily)
