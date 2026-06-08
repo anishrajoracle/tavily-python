@@ -1,5 +1,5 @@
-from tavily.databases import mongodb
-from tavily.databases import oracledb
+from tavily.databases.mongodb import mongodb
+from tavily.databases.oracledb import oracledb
 
 PROVIDERS = {
     "mongodb": mongodb,

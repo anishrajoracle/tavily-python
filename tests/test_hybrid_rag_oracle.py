@@ -1,7 +1,7 @@
 import pytest
 
 from tavily import TavilyHybridClient
-from tavily.databases import oracledb as oracle_database
+from tavily.databases.oracledb import oracledb as oracle_database
 
 
 DEFAULT_SCHEMA_ROWS = [

@@ -3,7 +3,7 @@ from datetime import datetime, timedelta, timezone
 import hashlib
 import json
 
-from tavily.databases.oracle_config import (
+from tavily.databases.oracledb.oracle_config import (
     ORACLE_CACHE_HIT_FIELD,
     ORACLE_CONTENT_HASH_FIELD,
     ORACLE_EXPIRES_AT_FIELD,

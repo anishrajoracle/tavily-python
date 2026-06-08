@@ -6,9 +6,9 @@ from tavily import TavilyClient
 from tavily.databases import get_provider
 from tavily.databases.base import DatabaseProvider
 from tavily.databases.connections import connect_mongodb, connect_oracle
-from tavily.databases import oracledb as oracle_database
+from tavily.databases.oracledb import oracledb as oracle_database
 from tavily.databases.config import PERSISTENCE_DEPTHS, RETRIEVAL_MODES
-from tavily.databases.oracle_config import ORACLE_CACHE_TIMESTAMP_FIELD
+from tavily.databases.oracledb.oracle_config import ORACLE_CACHE_TIMESTAMP_FIELD
 from tavily.hybrid_rag.embeddings import cohere_embed, cohere_rerank
 from tavily.hybrid_rag import retrieval_modes
 
