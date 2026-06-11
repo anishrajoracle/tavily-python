@@ -18,6 +18,7 @@ htmlcov/
 # Other
 .DS_Store
 .env
+.env.example
 .venv/
 venv/
 test_local.py

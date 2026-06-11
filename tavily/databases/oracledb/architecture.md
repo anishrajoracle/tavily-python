@@ -46,7 +46,7 @@ Returned rows use an origin marker:
 
 Use `hybrid_search` when the response should combine local Oracle memory with fresh Tavily results, then rerank the combined candidate set.
 
-![hybrid_search mode](assets/architecture/hybrid-search-mode.png)
+![hybrid_search mode](architecture/hybrid-search-mode.png)
 
 ### Routing Rules
 
@@ -69,7 +69,7 @@ Use `hybrid_search` when the response should combine local Oracle memory with fr
 
 Use `freshness_cache` when fresh Oracle cache hits should short-circuit the request and avoid a Tavily call.
 
-![freshness_cache mode](assets/architecture/freshness-cache-mode.png)
+![freshness_cache mode](architecture/freshness-cache-mode.png)
 
 ### Routing Rules
 
@@ -93,7 +93,7 @@ Use `freshness_cache` when fresh Oracle cache hits should short-circuit the requ
 
 Use `cache_then_memory` when the client should prefer fresh cache rows, then durable memory rows, and call Tavily only as the final fallback. The infographic uses an earlier proposal label, `freshness_cache_memory_mode`; the implemented SDK mode string is `cache_then_memory`.
 
-![cache_then_memory mode](assets/architecture/cache-then-memory-mode.png)
+![cache_then_memory mode](architecture/cache-then-memory-mode.png)
 
 ### Routing Rules
 
