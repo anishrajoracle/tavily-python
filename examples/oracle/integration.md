@@ -277,7 +277,7 @@ client = TavilyHybridClient(
 )
 ```
 
-Use this when your local Oracle table has enough content for both lexical and semantic matching. For free-form user questions, sanitize or simplify text queries before routing them into Oracle Text.
+Use this when your local Oracle table has enough content for both lexical and semantic matching. The provider sanitizes free-form user questions before routing them into Oracle Text. If Oracle Text still rejects a query at runtime, the provider falls back to vector-only Oracle search so the request can continue.
 
 ## Optional: Create a Vector Index
 
@@ -297,6 +297,8 @@ client = TavilyHybridClient(
 created = client.ensure_oracle_vector_index()
 print("Created index:", created)
 ```
+
+Oracle local search uses the configured `vector_index_distance` for `VECTOR_DISTANCE(...)`. The same distance setting is also used by semantic deduplication.
 
 ## Critical Knobs
 
@@ -337,4 +339,3 @@ print("Created index:", created)
 | Cache always misses | Confirm `ADDED_AT` exists, has timestamps, and `cache_score_threshold` is not too high. |
 | Tavily keeps getting called in `hybrid_search` | That is expected when `max_foreign > 0`; use `freshness_cache` or `cache_then_memory` to avoid repeat Tavily calls. |
 | Default embedding/ranking errors | Install `cohere`, set `CO_API_KEY`, or pass custom `embedding_function` and `ranking_function`. |
-

@@ -2,6 +2,7 @@ import array
 from datetime import datetime, timedelta, timezone
 import hashlib
 import json
+import re
 
 from tavily.databases.oracledb.oracle_config import (
     ORACLE_CACHE_HIT_FIELD,
@@ -23,6 +24,9 @@ from tavily.databases.oracledb.oracle_config import (
     ORACLE_VECTOR_INDEX_ORGANIZATIONS,
     ORACLE_VECTOR_INDEX_TYPES,
 )
+
+
+ORACLE_TEXT_TOKEN = re.compile(r"[A-Za-z0-9]+")
 
 
 def validate_client(_client):
@@ -233,15 +237,35 @@ def search(client, query_embeddings, max_local, query=None, cache_ttl_seconds=No
         return []
 
     if client.enable_native_hybrid_search and query:
-        return search_native_hybrid(
-            client,
-            query_embeddings,
-            max_local,
-            query,
-            cache_ttl_seconds=cache_ttl_seconds,
-            memory_scopes=memory_scopes
-        )
+        try:
+            return search_native_hybrid(
+                client,
+                query_embeddings,
+                limit,
+                query,
+                cache_ttl_seconds=cache_ttl_seconds,
+                memory_scopes=memory_scopes
+            )
+        except Exception as exc:
+            if not is_oracle_text_query_error(exc):
+                raise
 
+    return search_vector(
+        client,
+        query_embeddings,
+        limit,
+        cache_ttl_seconds=cache_ttl_seconds,
+        memory_scopes=memory_scopes
+    )
+
+
+def search_vector(client, query_embeddings, max_local, cache_ttl_seconds=None,
+                  memory_scopes=None):
+    limit = int(max_local)
+    if limit < 1:
+        return []
+
+    vector_distance = vector_distance_expression(client)
     execute_kwargs = {"query_vector": to_vector(query_embeddings)}
     freshness_filter = build_freshness_filter(
         client.cache_timestamp_field,
@@ -253,14 +277,14 @@ def search(client, query_embeddings, max_local, query=None, cache_ttl_seconds=No
 
     sql = f"""
             SELECT {client.content_field},
-                   1 - VECTOR_DISTANCE({client.embeddings_field}, :query_vector, COSINE) AS score,
+                   1 - {vector_distance} AS score,
                    'local' AS origin
             FROM {client.table_name}
             WHERE {client.embeddings_field} IS NOT NULL
               {freshness_filter}
               {metadata_filter}
               {memory_scope_filter}
-            ORDER BY VECTOR_DISTANCE({client.embeddings_field}, :query_vector, COSINE)
+            ORDER BY {vector_distance}
             FETCH FIRST {limit} ROWS ONLY
         """
 
@@ -276,15 +300,49 @@ def search(client, query_embeddings, max_local, query=None, cache_ttl_seconds=No
         ]
 
 
+def sanitize_oracle_text_query(query):
+    return " ".join(ORACLE_TEXT_TOKEN.findall(str(query)))
+
+
+def is_oracle_text_query_error(exc):
+    message = str(exc)
+    return (
+        "DRG-" in message
+        or "Oracle Text error" in message
+        or "ODCIINDEXSTART" in message
+    )
+
+
+def vector_distance_expression(client):
+    distance_metric = validate_vector_distance(
+        getattr(client, "vector_index_distance", "COSINE")
+    )
+    return (
+        f"VECTOR_DISTANCE({client.embeddings_field}, "
+        f":query_vector, {distance_metric})"
+    )
+
+
 def search_native_hybrid(client, query_embeddings, max_local, query,
                          cache_ttl_seconds=None, memory_scopes=None):
     limit = int(max_local)
     if limit < 1:
         return []
 
+    text_query = sanitize_oracle_text_query(query)
+    if not text_query:
+        return search_vector(
+            client,
+            query_embeddings,
+            limit,
+            cache_ttl_seconds=cache_ttl_seconds,
+            memory_scopes=memory_scopes
+        )
+
+    vector_distance = vector_distance_expression(client)
     execute_kwargs = {
         "query_vector": to_vector(query_embeddings),
-        "text_query": query,
+        "text_query": text_query,
     }
     freshness_filter = build_freshness_filter(
         client.cache_timestamp_field,
@@ -297,19 +355,19 @@ def search_native_hybrid(client, query_embeddings, max_local, query,
     sql = f"""
             WITH vector_candidates AS (
                 SELECT ROWID AS rid,
-                       1 - VECTOR_DISTANCE({client.embeddings_field}, :query_vector, COSINE) AS vector_score,
+                       1 - {vector_distance} AS vector_score,
                        0 AS text_score
                 FROM {client.table_name}
                 WHERE {client.embeddings_field} IS NOT NULL
                   {freshness_filter}
                   {metadata_filter}
                   {memory_scope_filter}
-                ORDER BY VECTOR_DISTANCE({client.embeddings_field}, :query_vector, COSINE)
+                ORDER BY {vector_distance}
                 FETCH FIRST {limit} ROWS ONLY
             ),
             text_candidates AS (
                 SELECT ROWID AS rid,
-                       1 - VECTOR_DISTANCE({client.embeddings_field}, :query_vector, COSINE) AS vector_score,
+                       1 - {vector_distance} AS vector_score,
                        SCORE(1) / 100 AS text_score
                 FROM {client.table_name}
                 WHERE {client.embeddings_field} IS NOT NULL
@@ -496,11 +554,12 @@ def get_document_value(document, column_name):
 
 
 def is_duplicate(client, embedding):
+    vector_distance = vector_distance_expression(client)
     sql = f"""
-            SELECT 1 - VECTOR_DISTANCE({client.embeddings_field}, :query_vector, COSINE) AS score
+            SELECT 1 - {vector_distance} AS score
             FROM {client.table_name}
             WHERE {client.embeddings_field} IS NOT NULL
-            ORDER BY VECTOR_DISTANCE({client.embeddings_field}, :query_vector, COSINE)
+            ORDER BY {vector_distance}
             FETCH FIRST 1 ROWS ONLY
         """
 

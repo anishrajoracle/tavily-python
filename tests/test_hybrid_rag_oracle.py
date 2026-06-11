@@ -90,6 +90,26 @@ class FakeConnection:
         self.committed = True
 
 
+class OracleTextFailingCursor(FakeCursor):
+    def execute(self, sql, **kwargs):
+        self.executed = (sql, kwargs)
+        self.executed_calls.append((sql, kwargs))
+        if "CONTAINS" in sql:
+            raise RuntimeError("ORA-29902: Oracle Text error DRG-50901")
+        if "USER_TAB_COLUMNS" in sql:
+            self.active_rows = self.schema_rows
+        elif self.rows_sequence:
+            self.active_rows = self.rows_sequence.pop(0)
+        else:
+            self.active_rows = self.rows
+
+
+class OracleTextFailingConnection(FakeConnection):
+    def __init__(self):
+        self.cursor_instance = OracleTextFailingCursor()
+        self.committed = False
+
+
 class FakeTavilyClient:
     def __init__(self, results=None):
         self.calls = []
@@ -143,6 +163,25 @@ def test_oracle_search_uses_vector_distance_without_touching_mongodb_collection(
     assert "CONTAINS" not in sql
 
 
+def test_oracle_search_uses_configured_vector_distance():
+    connection = FakeConnection()
+    client = TavilyHybridClient(
+        api_key="tvly-test",
+        db_provider="oracle",
+        connection=connection,
+        table_name="tavily_documents",
+        vector_index_distance="DOT",
+        embedding_function=lambda texts, _: [[0.1, 0.2, 0.3]],
+        ranking_function=lambda _, documents, __: documents,
+    )
+
+    client.search("test query", max_local=1, max_foreign=0)
+
+    sql, _kwargs = connection.cursor_instance.executed
+    assert "VECTOR_DISTANCE(EMBEDDINGS, :query_vector, DOT)" in sql
+    assert "VECTOR_DISTANCE(EMBEDDINGS, :query_vector, COSINE)" not in sql
+
+
 def test_oracle_native_hybrid_search_uses_oracle_text_and_metadata_filters():
     connection = FakeConnection()
     client = TavilyHybridClient(
@@ -167,6 +206,47 @@ def test_oracle_native_hybrid_search_uses_oracle_text_and_metadata_filters():
     assert "PROVIDER_NAME = :metadata_filter_0" in sql
     assert kwargs["text_query"] == "test query"
     assert kwargs["metadata_filter_0"] == "tavily"
+
+
+def test_oracle_native_hybrid_search_sanitizes_oracle_text_query():
+    connection = FakeConnection()
+    client = TavilyHybridClient(
+        api_key="tvly-test",
+        db_provider="oracle",
+        connection=connection,
+        table_name="tavily_documents",
+        enable_native_hybrid_search=True,
+        embedding_function=lambda texts, _: [[0.1, 0.2, 0.3]],
+        ranking_function=lambda _, documents, __: documents,
+    )
+
+    client.search("How can Oracle VECTOR + Tavily help?", max_local=1, max_foreign=0)
+
+    _sql, kwargs = connection.cursor_instance.executed
+    assert kwargs["text_query"] == "How can Oracle VECTOR Tavily help"
+
+
+def test_oracle_native_hybrid_search_falls_back_to_vector_search_on_text_error():
+    connection = OracleTextFailingConnection()
+    client = TavilyHybridClient(
+        api_key="tvly-test",
+        db_provider="oracle",
+        connection=connection,
+        table_name="tavily_documents",
+        enable_native_hybrid_search=True,
+        embedding_function=lambda texts, _: [[0.1, 0.2, 0.3]],
+        ranking_function=lambda _, documents, __: documents,
+    )
+
+    results = client.search("How can Oracle VECTOR + Tavily help?", max_local=1, max_foreign=0)
+
+    native_sql, native_kwargs = connection.cursor_instance.executed_calls[0]
+    fallback_sql, _fallback_kwargs = connection.cursor_instance.executed_calls[-1]
+    assert "CONTAINS(CONTENT, :text_query, 1) > 0" in native_sql
+    assert native_kwargs["text_query"] == "How can Oracle VECTOR Tavily help"
+    assert "CONTAINS" not in fallback_sql
+    assert "WITH vector_candidates AS" not in fallback_sql
+    assert results == [{"content": "local content", "score": 0.75, "origin": "local"}]
 
 
 def test_oracle_insert_converts_embeddings_to_vector_bind():

@@ -63,7 +63,7 @@ Use `hybrid_search` when the response should combine local Oracle memory with fr
 - Tavily being called repeatedly is expected in this mode when `max_foreign > 0`.
 - Set `max_foreign=0` for a local-only retrieval pass.
 - Use `persistence_depth="cache_plus_memory"` when saved Tavily rows should be reusable as durable memory.
-- Use `enable_native_hybrid_search=True` only when the Oracle table has an Oracle Text index and the query text is safe for Oracle Text parsing.
+- Use `enable_native_hybrid_search=True` only when the Oracle table has an Oracle Text index. The provider sanitizes the Oracle Text query and falls back to vector-only search if Oracle Text rejects it.
 
 ## 2. `freshness_cache`
 
@@ -175,7 +175,7 @@ Minimum Oracle storage needs content, embeddings, and a timestamp column. Full c
 | Memory fallback does not hit | Check `persistence_depth="cache_plus_memory"`, `enable_oracle_memory_metadata`, `memory_score_threshold`, and `memory_max_results`. |
 | Save fails with missing columns | Add the optional metadata columns required by the features you enabled. |
 | Duplicate rows grow too quickly | Configure `oracle_upsert_key`, `dedup_similarity_threshold`, `max_persisted_foreign`, or `persist_score_threshold`. |
-| Native Oracle hybrid search errors | Confirm the Oracle Text index exists and sanitize natural-language queries before Oracle Text parsing. |
+| Native Oracle hybrid search silently behaves like vector search | Confirm the Oracle Text index exists. If Oracle Text rejects a sanitized query, the provider falls back to vector-only search to keep retrieval working. |
 
 ## Quick Implementation Map
 

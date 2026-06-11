@@ -80,7 +80,7 @@ The demo notebooks call helper code that creates or upgrades this table shape au
 
 ## Scoring
 
-Oracle local vector score is based on cosine distance:
+Oracle local vector score uses the configured vector distance metric. By default, that metric is `COSINE`:
 
 ```sql
 1 - VECTOR_DISTANCE(embeddings, :query_vector, COSINE)
@@ -88,7 +88,7 @@ Oracle local vector score is based on cosine distance:
 
 This is a ranking signal, not a probability. A local score like `0.5` does not mean "50 percent correct." It means the query vector and stored vector are close enough under the chosen embedding model and distance metric to be useful for ranking.
 
-Tavily result scores and Oracle vector scores are not guaranteed to be calibrated to the same scale. The configured `ranking_function` decides how merged results are sorted.
+If you pass a different `vector_index_distance`, Oracle local search and semantic deduplication use that metric too. Tavily result scores and Oracle vector scores are not guaranteed to be calibrated to the same scale. The configured `ranking_function` decides how merged results are sorted.
 
 ## Native Oracle Text Hybrid Search
 
@@ -100,7 +100,7 @@ ON tavily_documents(content)
 INDEXTYPE IS CTXSYS.CONTEXT;
 ```
 
-The demo notebooks keep `enable_native_hybrid_search=False` for stability. Raw natural-language questions can include characters that Oracle Text parses as query syntax, which can produce parser errors unless the query is sanitized or simplified.
+When native hybrid search is enabled, the provider sanitizes the text query before passing it into Oracle Text. If Oracle Text still rejects the query at runtime, the provider falls back to vector-only Oracle search instead of failing the whole request. The demo notebooks keep `enable_native_hybrid_search=False` by default because vector-only local search is simpler to run in every environment.
 
 ## Persistence Controls
 
