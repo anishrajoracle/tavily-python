@@ -5,6 +5,7 @@ from tavily.databases.oracledb import oracledb as oracle_database
 
 
 DEFAULT_SCHEMA_ROWS = [
+    ("ADDED_AT", "TIMESTAMP"),
     ("CONTENT", "CLOB"),
     ("EMBEDDINGS", "VECTOR"),
     ("SITE_URL", "VARCHAR2"),
@@ -271,8 +272,8 @@ def test_oracle_insert_converts_embeddings_to_vector_bind():
     sql, rows = connection.cursor_instance.executemany_call
     assert sql == (
         "INSERT INTO TAVILY_DOCUMENTS "
-        "(CONTENT, EMBEDDINGS, SITE_URL) "
-        "VALUES (:CONTENT, :EMBEDDINGS, :SITE_URL)"
+        "(EMBEDDINGS, SITE_URL, CONTENT) "
+        "VALUES (:EMBEDDINGS, :SITE_URL, :CONTENT)"
     )
     assert rows[0]["CONTENT"] == "foreign content"
     assert rows[0]["SITE_URL"] == "https://example.com"
@@ -316,6 +317,37 @@ def test_oracle_save_foreign_can_store_json_payload_and_provenance_metadata():
     assert raw_payload
     assert '"provider_name": "tavily"' in raw_payload
     assert '"url": "https://example.com/oracle"' in raw_payload
+
+
+def test_oracle_insert_orders_lob_binds_last_to_avoid_ora_24816():
+    connection = FakeConnection()
+    client = TavilyHybridClient(
+        api_key="tvly-test",
+        db_provider="oracle",
+        connection=connection,
+        table_name="tavily_documents",
+        enable_oracle_json_payload=True,
+        enable_provenance_metadata=True,
+        embedding_function=lambda texts, _: [[0.7, 0.8, 0.9] for _ in texts],
+        ranking_function=lambda _, documents, __: documents,
+    )
+    client.tavily = FakeTavilyClient()
+
+    client.search(
+        "test query",
+        max_local=0,
+        max_foreign=1,
+        save_foreign=True,
+    )
+
+    sql, rows = connection.cursor_instance.executemany_call
+    content_position = sql.index(":CONTENT")
+    raw_payload_position = sql.index(":RAW_PAYLOAD")
+    for scalar_bind in (":EMBEDDINGS", ":SOURCE_URL", ":SOURCE_TITLE", ":PROVIDER_NAME"):
+        assert sql.index(scalar_bind) < content_position
+        assert sql.index(scalar_bind) < raw_payload_position
+    assert rows[0]["CONTENT"] == "foreign oracle content"
+    assert rows[0]["RAW_PAYLOAD"]
 
 
 def test_oracle_insert_schema_validation_rejects_missing_columns():
@@ -435,9 +467,10 @@ def test_oracle_freshness_cache_miss_calls_tavily_and_saves_foreign_results():
     ]
     assert sql == (
         "INSERT INTO TAVILY_DOCUMENTS "
-        "(CONTENT, EMBEDDINGS) "
-        "VALUES (:CONTENT, :EMBEDDINGS)"
+        "(ADDED_AT, EMBEDDINGS, CONTENT) "
+        "VALUES (:ADDED_AT, :EMBEDDINGS, :CONTENT)"
     )
+    assert rows[0]["ADDED_AT"] is not None
     assert rows[0]["CONTENT"] == "foreign oracle content"
     assert rows[0]["EMBEDDINGS"].typecode == "f"
     assert list(rows[0]["EMBEDDINGS"]) == pytest.approx([0.7, 0.8, 0.9])
@@ -609,6 +642,7 @@ def test_oracle_source_url_upsert_uses_merge_without_requiring_provenance_flag()
     assert connection.cursor_instance.executemany_call is None
     assert "MERGE INTO TAVILY_DOCUMENTS target" in sql
     assert "ON (target.SOURCE_URL = source.SOURCE_URL)" in sql
+    assert sql.index(":EMBEDDINGS") < sql.index(":CONTENT")
     assert kwargs["SOURCE_URL"] == "https://example.com/oracle"
     assert connection.committed is True
 
@@ -717,8 +751,8 @@ def test_oracle_save_foreign_inserts_tavily_results():
     ]
     assert sql == (
         "INSERT INTO TAVILY_DOCUMENTS "
-        "(CONTENT, EMBEDDINGS) "
-        "VALUES (:CONTENT, :EMBEDDINGS)"
+        "(EMBEDDINGS, CONTENT) "
+        "VALUES (:EMBEDDINGS, :CONTENT)"
     )
     assert rows[0]["CONTENT"] == "foreign oracle content"
     assert rows[0]["EMBEDDINGS"].typecode == "f"

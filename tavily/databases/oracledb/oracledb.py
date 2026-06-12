@@ -470,16 +470,24 @@ def build_memory_scope_filter(memory_scopes, execute_kwargs):
 
 
 def build_persistence_metadata(client, result, query, cache_hit):
+    needs_cache_timestamp = (
+        client.retrieval_mode in ("freshness_cache", "cache_then_memory")
+        or client.enable_oracle_memory_metadata
+    )
     if not (
         client.enable_oracle_json_payload
         or client.enable_provenance_metadata
         or client.enable_oracle_memory_metadata
         or client.oracle_upsert_key is not None
+        or needs_cache_timestamp
     ):
         return {}
 
     timestamp = datetime.now(timezone.utc)
     metadata = {}
+
+    if needs_cache_timestamp:
+        metadata[client.cache_timestamp_field] = timestamp
 
     if client.enable_oracle_json_payload:
         payload = {
@@ -694,7 +702,7 @@ def normalize_documents(client, documents):
 
 
 def insert_normalized_documents(client, normalized_documents, column_names):
-    ordered_columns = sorted(column_names)
+    ordered_columns = order_columns_for_oracle_binds(client, column_names)
     columns = ", ".join(ordered_columns)
     placeholders = ", ".join(f":{column}" for column in ordered_columns)
     sql = f"INSERT INTO {client.table_name} ({columns}) VALUES ({placeholders})"
@@ -725,7 +733,7 @@ def upsert_documents(client, normalized_documents, column_names):
     if not upsertable_documents:
         return
 
-    ordered_columns = sorted(column_names)
+    ordered_columns = order_columns_for_oracle_binds(client, column_names)
     update_columns = [column for column in ordered_columns if column != key_column]
     update_assignments = [
         build_upsert_update_assignment(column)
@@ -751,6 +759,18 @@ def upsert_documents(client, normalized_documents, column_names):
         for row in rows:
             cursor.execute(sql, **row)
     client.connection.commit()
+
+
+def order_columns_for_oracle_binds(client, column_names):
+    """Place LOB/LONG-style columns after regular binds to avoid ORA-24816."""
+    lob_columns = {
+        client.content_field,
+        ORACLE_RAW_PAYLOAD_FIELD,
+    }
+    return sorted(
+        column_names,
+        key=lambda column: (column in lob_columns, column)
+    )
 
 
 def upsert_key_column(oracle_upsert_key):
