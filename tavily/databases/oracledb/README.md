@@ -31,7 +31,9 @@ Persistence is controlled by `persistence_depth`.
 | `cache_only` | Rows are treated as short-lived cache rows. They can expire and be removed by cleanup. |
 | `cache_plus_memory` | Rows are also durable memory rows. They can be reused after cache TTL expiry. |
 
-When `enable_oracle_memory_metadata=True`, the provider can write these lifecycle columns:
+When omitted, `persistence_depth` defaults to `cache_plus_memory` for `cache_then_memory` and `cache_only` for the other modes.
+
+When `enable_oracle_memory_metadata=True`, the provider writes these lifecycle columns. `cache_then_memory` enables this internally because the mode needs `MEMORY_SCOPE` to distinguish fresh cache from durable memory.
 
 | Column | Purpose |
 | --- | --- |
@@ -40,7 +42,7 @@ When `enable_oracle_memory_metadata=True`, the provider can write these lifecycl
 | `LAST_SEEN_AT` | Last time the row was inserted or updated. |
 | `QUERY_COUNT` | Number of times the row was written through or upserted. |
 
-`cleanup_cache()` deletes expired `cache_only` rows when the memory metadata columns exist. It intentionally does not delete `cache_plus_memory` rows, because those rows are the long-term memory tier.
+`cleanup_cache()` deletes expired `cache_only` rows when the memory metadata columns exist. It intentionally does not delete `cache_plus_memory` rows, because those rows are the long-term memory tier. Unscoped rows are cleaned only when provenance columns identify them as Tavily-managed cache rows; this avoids deleting unrelated local knowledge from a shared Oracle table.
 
 ## Schema
 
@@ -55,7 +57,7 @@ CREATE TABLE tavily_documents (
 );
 ```
 
-Most Oracle features need optional metadata columns:
+Most Oracle features need optional metadata columns. `cache_then_memory`, inspectable provenance, URL/content-hash upsert, and safe cleanup should use the full shape below:
 
 ```sql
 ALTER TABLE tavily_documents ADD (
@@ -113,7 +115,7 @@ The provider includes several controls to prevent the table from growing too qui
 | `dedup_similarity_threshold` | Skips near-duplicate inserts using vector similarity. |
 | `oracle_upsert_key` | Updates existing rows by `source_url` or `content_hash` instead of repeatedly inserting. |
 | `cache_ttl_seconds` | Controls the fresh-cache time window. |
-| `cleanup_cache()` | Deletes expired cache-only rows. |
+| `cleanup_cache()` | Deletes expired cache-managed rows without deleting durable memory rows. |
 | `auto_cleanup_cache=True` | Runs cleanup before search, rate-limited by `cache_cleanup_interval_seconds`. |
 
 ## JSON and Provenance

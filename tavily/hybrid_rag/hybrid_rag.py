@@ -31,7 +31,7 @@ class TavilyHybridClient():
             cache_ttl_seconds: int = 86400,
             cache_score_threshold: float = 0.0,
             cache_timestamp_field: str = ORACLE_CACHE_TIMESTAMP_FIELD,
-            persistence_depth: Literal['cache_only', 'cache_plus_memory'] = 'cache_only',
+            persistence_depth: Optional[Literal['cache_only', 'cache_plus_memory']] = None,
             memory_score_threshold: float = 0.0,
             memory_max_results: Optional[int] = None,
             enable_oracle_memory_metadata: bool = False,
@@ -80,7 +80,7 @@ class TavilyHybridClient():
         cache_ttl_seconds (int): Freshness window used by Oracle freshness_cache mode.
         cache_score_threshold (float): Minimum local score needed for an Oracle freshness_cache hit.
         cache_timestamp_field (str): Oracle timestamp column used by freshness_cache mode.
-        persistence_depth (str): Oracle memory lifecycle scope, 'cache_only' or 'cache_plus_memory'.
+        persistence_depth (str): Oracle memory lifecycle scope, 'cache_only' or 'cache_plus_memory'. Defaults to 'cache_plus_memory' for cache_then_memory and 'cache_only' otherwise.
         memory_score_threshold (float): Minimum local score needed for an Oracle long-term memory hit.
         memory_max_results (int): Maximum long-term memory results to inspect in cache_then_memory mode.
         enable_oracle_memory_metadata (bool): If True, Oracle save_foreign=True writes cache/memory lifecycle columns.
@@ -166,6 +166,13 @@ class TavilyHybridClient():
                 cache_score_threshold = float(cache_score_threshold)
             except (TypeError, ValueError) as exc:
                 raise ValueError("cache_score_threshold must be a number.") from exc
+        if db_provider == 'oracle' and retrieval_mode == 'cache_then_memory':
+            enable_oracle_memory_metadata = True
+        if persistence_depth is None:
+            if db_provider == 'oracle' and retrieval_mode == 'cache_then_memory':
+                persistence_depth = 'cache_plus_memory'
+            else:
+                persistence_depth = 'cache_only'
         if db_provider == 'oracle':
             if persistence_depth not in PERSISTENCE_DEPTHS:
                 raise ValueError(

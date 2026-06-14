@@ -195,6 +195,8 @@ Expected behavior:
 
 Use `cache_then_memory` when you want a fresh-cache tier first, durable Oracle memory second, and Tavily only as the final fallback.
 
+This mode requires the Oracle memory metadata columns because the memory tier is scoped by `MEMORY_SCOPE`. When `persistence_depth` is omitted, this mode defaults it to `cache_plus_memory` so newly saved Tavily rows remain reusable after the cache TTL expires.
+
 ```python
 memory_client = TavilyHybridClient(
     api_key=os.environ["TAVILY_API_KEY"],
@@ -308,8 +310,8 @@ Oracle local search uses the configured `vector_index_distance` for `VECTOR_DIST
 | `cache_ttl_seconds` | `86400` | You need a shorter or longer freshness window. |
 | `cache_score_threshold` | `0.0` | You only want high-confidence cache hits. |
 | `memory_score_threshold` | `0.0` | You only want high-confidence durable memory hits. |
-| `persistence_depth` | `"cache_only"` | You want rows to expire as cache or survive as memory. |
-| `enable_oracle_memory_metadata` | `False` | You want lifecycle fields such as `MEMORY_SCOPE`, `EXPIRES_AT`, and `QUERY_COUNT`. |
+| `persistence_depth` | `"cache_only"`; `"cache_plus_memory"` in `cache_then_memory` | You want rows to expire as cache or survive as memory. |
+| `enable_oracle_memory_metadata` | `False` | You want lifecycle fields such as `MEMORY_SCOPE`, `EXPIRES_AT`, and `QUERY_COUNT`; `cache_then_memory` enables this internally. |
 | `enable_oracle_json_payload` | `False` | You want the raw Tavily result payload stored in Oracle. |
 | `enable_provenance_metadata` | `False` | You want source URL, query, mode, cache-hit, and provider columns. |
 | `dedup_similarity_threshold` | `None` | You want to skip near-duplicate Oracle inserts. |
@@ -323,6 +325,7 @@ Oracle local search uses the configured `vector_index_distance` for `VECTOR_DIST
 - Keep database connection lifecycle in your application. Pass an existing `oracledb` connection into `TavilyHybridClient`.
 - Use `save_foreign=True` only when you want Tavily results written into Oracle.
 - Use `cache_only` for short-lived cache rows and `cache_plus_memory` for long-term memory rows.
+- Keep unrelated hand-curated local knowledge in a separate table, or mark Tavily-managed rows with provenance fields, so cleanup can safely tell cache rows apart from durable knowledge.
 - Treat Oracle vector scores and Tavily scores as ranking signals, not calibrated probabilities.
 - Add `max_persisted_foreign`, `persist_score_threshold`, `oracle_upsert_key`, or `dedup_similarity_threshold` before running high-volume workloads.
 - Use `AsyncTavilyClient` for direct Tavily API fan-out. `TavilyHybridClient` is currently a synchronous hybrid retrieval helper.
@@ -334,7 +337,7 @@ Oracle local search uses the configured `vector_index_distance` for `VECTOR_DIST
 | --- | --- |
 | `connection is required when db_provider='oracle'` | Create an `oracledb.connect(...)` connection before constructing the client, or pass Oracle credentials through the constructor. |
 | `table_name is required when db_provider='oracle'` | Pass the Oracle table that stores `content` and `embeddings`. |
-| Missing column errors on `save_foreign=True` | Add the optional metadata columns for the features you enabled. |
+| Missing column errors on `save_foreign=True` | Add the optional metadata columns for the features you enabled. `cache_then_memory` needs the memory metadata columns. |
 | Vector search errors | Confirm the database supports `VECTOR`, the column dimension matches your embedding model, and rows have embeddings. |
 | Cache always misses | Confirm `ADDED_AT` exists, has timestamps, and `cache_score_threshold` is not too high. |
 | Tavily keeps getting called in `hybrid_search` | That is expected when `max_foreign > 0`; use `freshness_cache` or `cache_then_memory` to avoid repeat Tavily calls. |

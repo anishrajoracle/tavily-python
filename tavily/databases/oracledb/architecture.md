@@ -99,19 +99,19 @@ Use `cache_then_memory` when the client should prefer fresh cache rows, then dur
 
 | Step | Behavior |
 | --- | --- |
-| Fresh cache lookup | Searches Oracle rows inside `cache_ttl_seconds`. When memory metadata is enabled, both `cache_only` and `cache_plus_memory` rows can satisfy the cache tier. |
+| Fresh cache lookup | Searches Oracle rows inside `cache_ttl_seconds`. Both `cache_only` and `cache_plus_memory` rows can satisfy the cache tier. |
 | Cache threshold | Keeps only rows with `score >= cache_score_threshold`. |
 | Cache hit | Returns fresh cache rows immediately and skips memory plus Tavily. |
-| Memory lookup | On cache miss, searches Oracle again without the TTL filter. When memory metadata is enabled, this tier is limited to `cache_plus_memory` rows. |
+| Memory lookup | On cache miss, searches Oracle again without the TTL filter. This tier is limited to `cache_plus_memory` rows by `MEMORY_SCOPE`. |
 | Memory threshold | Keeps only rows with `score >= memory_score_threshold`. |
 | Memory hit | Returns durable memory rows immediately and skips Tavily. |
 | Full miss | Calls Tavily only when `max_foreign > 0`; otherwise returns an empty list. |
-| Save | If `save_foreign=True`, Tavily rows can be appended or upserted into Oracle. Use `persistence_depth="cache_plus_memory"` when those rows should survive cache expiry. |
+| Save | If `save_foreign=True`, Tavily rows can be appended or upserted into Oracle. When omitted, `persistence_depth` defaults to `cache_plus_memory` in this mode so saved rows can survive cache expiry. |
 
 ### Developer Notes
 
 - This mode is Oracle-only.
-- Set `enable_oracle_memory_metadata=True` when you want strict cache versus memory lifecycle behavior.
+- The client enables Oracle memory metadata internally for this mode, so the table must include `MEMORY_SCOPE`, `EXPIRES_AT`, `LAST_SEEN_AT`, and `QUERY_COUNT`.
 - `memory_max_results` controls how many durable memory rows are inspected; when omitted, the memory tier uses `max_local`.
 - If memory does not recover after cache expiry, confirm rows were saved with `persistence_depth="cache_plus_memory"` and that `memory_score_threshold` is not too high.
 
@@ -130,12 +130,12 @@ Tavily results
 | Control | What it changes |
 | --- | --- |
 | `save_foreign` | Enables persistence when set to `True`, or allows a custom transform function. |
-| `persistence_depth` | Writes rows as `cache_only` or `cache_plus_memory` when Oracle memory metadata is enabled. |
+| `persistence_depth` | Writes rows as `cache_only` or `cache_plus_memory` when Oracle memory metadata is enabled, or automatically in cache modes when the table has lifecycle columns. Defaults to `cache_plus_memory` for `cache_then_memory`. |
 | `max_persisted_foreign` | Caps how many Tavily rows are saved per search. |
 | `persist_score_threshold` | Saves only Tavily rows above the configured Tavily score threshold. |
 | `dedup_similarity_threshold` | Skips near-duplicate Oracle inserts by vector similarity. |
 | `oracle_upsert_key` | Updates existing rows by `source_url` or `content_hash` instead of repeatedly inserting. |
-| `auto_cleanup_cache` | Runs expired cache cleanup before searches, rate-limited by `cache_cleanup_interval_seconds`. |
+| `auto_cleanup_cache` | Runs expired cache-managed cleanup before searches, rate-limited by `cache_cleanup_interval_seconds`. |
 
 Minimum Oracle storage needs content, embeddings, and a timestamp column. Full cache and memory behavior is easier to inspect when these optional columns exist:
 
@@ -160,7 +160,7 @@ Minimum Oracle storage needs content, embeddings, and a timestamp column. Full c
 | `cache_score_threshold` | `0.0` | You only want high-confidence cache hits. |
 | `memory_score_threshold` | `0.0` | You only want high-confidence durable memory hits. |
 | `memory_max_results` | `None` | You want the memory tier to inspect a different number of rows than `max_local`. |
-| `enable_oracle_memory_metadata` | `False` | You want lifecycle columns such as `MEMORY_SCOPE`, `EXPIRES_AT`, and `QUERY_COUNT`. |
+| `enable_oracle_memory_metadata` | `False` | You want lifecycle columns such as `MEMORY_SCOPE`, `EXPIRES_AT`, and `QUERY_COUNT`; `cache_then_memory` enables this internally. |
 | `enable_oracle_json_payload` | `False` | You want raw Tavily payloads stored in Oracle. |
 | `enable_provenance_metadata` | `False` | You want reviewable source, query, provider, mode, and cache-hit columns. |
 
@@ -172,7 +172,7 @@ Minimum Oracle storage needs content, embeddings, and a timestamp column. Full c
 | Tavily is not called on a fresh cache hit | This is expected in `freshness_cache` and `cache_then_memory`. |
 | Cache mode returns `[]` | Confirm whether the cache missed and `max_foreign` was set to `0`. |
 | Cache always misses | Check `ADDED_AT`, the TTL window, `cache_score_threshold`, and whether the table has embeddings. |
-| Memory fallback does not hit | Check `persistence_depth="cache_plus_memory"`, `enable_oracle_memory_metadata`, `memory_score_threshold`, and `memory_max_results`. |
+| Memory fallback does not hit | Check `persistence_depth="cache_plus_memory"`, memory metadata columns, `memory_score_threshold`, and `memory_max_results`. |
 | Save fails with missing columns | Add the optional metadata columns required by the features you enabled. |
 | Duplicate rows grow too quickly | Configure `oracle_upsert_key`, `dedup_similarity_threshold`, `max_persisted_foreign`, or `persist_score_threshold`. |
 | Native Oracle hybrid search silently behaves like vector search | Confirm the Oracle Text index exists. If Oracle Text rejects a sanitized query, the provider falls back to vector-only search to keep retrieval working. |

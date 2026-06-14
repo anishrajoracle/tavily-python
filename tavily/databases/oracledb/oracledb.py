@@ -27,6 +27,25 @@ from tavily.databases.oracledb.oracle_config import (
 
 
 ORACLE_TEXT_TOKEN = re.compile(r"[A-Za-z0-9]+")
+ORACLE_MEMORY_METADATA_FIELDS = (
+    ORACLE_MEMORY_SCOPE_FIELD,
+    ORACLE_EXPIRES_AT_FIELD,
+    ORACLE_LAST_SEEN_AT_FIELD,
+    ORACLE_QUERY_COUNT_FIELD,
+)
+ORACLE_CACHE_RETRIEVAL_MODES = ("freshness_cache", "cache_then_memory")
+
+
+def utc_now():
+    return datetime.now(timezone.utc)
+
+
+def utc_naive_now():
+    return utc_now().replace(tzinfo=None)
+
+
+def cache_cutoff_timestamp(cache_ttl_seconds):
+    return utc_naive_now() - timedelta(seconds=cache_ttl_seconds)
 
 
 def validate_client(_client):
@@ -213,7 +232,7 @@ def _is_text_type(data_type):
 
 
 def _is_json_storage_type(data_type):
-    return _is_text_type(data_type) or data_type in {"JSON", "BLOB"}
+    return _is_text_type(data_type) or data_type == "JSON"
 
 
 def _is_timestamp_type(data_type):
@@ -228,6 +247,10 @@ def _is_number_type(data_type):
         or data_type.startswith("BINARY_DOUBLE")
         or data_type.startswith("FLOAT")
     )
+
+
+def _is_lob_or_long_type(data_type):
+    return data_type in {"BLOB", "CLOB", "NCLOB", "LONG"}
 
 
 def search(client, query_embeddings, max_local, query=None, cache_ttl_seconds=None,
@@ -273,7 +296,7 @@ def search_vector(client, query_embeddings, max_local, cache_ttl_seconds=None,
         execute_kwargs
     )
     metadata_filter = build_metadata_filter(client.oracle_metadata_filters, execute_kwargs)
-    memory_scope_filter = build_memory_scope_filter(memory_scopes, execute_kwargs)
+    memory_scope_filter = build_memory_scope_filter(client, memory_scopes, execute_kwargs)
 
     sql = f"""
             SELECT {client.content_field},
@@ -350,7 +373,7 @@ def search_native_hybrid(client, query_embeddings, max_local, query,
         execute_kwargs
     )
     metadata_filter = build_metadata_filter(client.oracle_metadata_filters, execute_kwargs)
-    memory_scope_filter = build_memory_scope_filter(memory_scopes, execute_kwargs)
+    memory_scope_filter = build_memory_scope_filter(client, memory_scopes, execute_kwargs)
 
     sql = f"""
             WITH vector_candidates AS (
@@ -414,12 +437,8 @@ def build_freshness_filter(cache_timestamp_field, cache_ttl_seconds, execute_kwa
     if cache_ttl_seconds is None:
         return ""
 
-    execute_kwargs["cache_ttl_seconds"] = cache_ttl_seconds
-    return (
-        f"AND {cache_timestamp_field} >= "
-        "CAST(SYSTIMESTAMP AS TIMESTAMP) - "
-        "NUMTODSINTERVAL(:cache_ttl_seconds, 'SECOND')"
-    )
+    execute_kwargs["cache_cutoff_timestamp"] = cache_cutoff_timestamp(cache_ttl_seconds)
+    return f"AND {cache_timestamp_field} >= :cache_cutoff_timestamp"
 
 
 def build_metadata_filter(oracle_metadata_filters, execute_kwargs):
@@ -452,13 +471,20 @@ def build_metadata_filter(oracle_metadata_filters, execute_kwargs):
     return "AND " + " AND ".join(clauses)
 
 
-def build_memory_scope_filter(memory_scopes, execute_kwargs):
+def build_memory_scope_filter(client, memory_scopes, execute_kwargs):
     if not memory_scopes:
         return ""
 
     scopes = list(memory_scopes)
     if not scopes:
         return ""
+
+    table_columns = fetch_table_columns(client)
+    if ORACLE_MEMORY_SCOPE_FIELD not in table_columns:
+        raise ValueError(
+            f"Oracle table {client.table_name} is missing {ORACLE_MEMORY_SCOPE_FIELD}. "
+            "Add the Oracle memory metadata columns before using cache_then_memory."
+        )
 
     bind_names = []
     for i, scope in enumerate(scopes):
@@ -469,25 +495,40 @@ def build_memory_scope_filter(memory_scopes, execute_kwargs):
     return f"AND {ORACLE_MEMORY_SCOPE_FIELD} IN ({', '.join(bind_names)})"
 
 
+def has_memory_metadata_columns(client):
+    table_columns = fetch_table_columns(client)
+    return all(column in table_columns for column in ORACLE_MEMORY_METADATA_FIELDS)
+
+
+def should_write_memory_metadata(client):
+    if client.enable_oracle_memory_metadata:
+        return True
+    return (
+        client.retrieval_mode in ORACLE_CACHE_RETRIEVAL_MODES
+        and has_memory_metadata_columns(client)
+    )
+
+
 def build_persistence_metadata(client, result, query, cache_hit):
+    write_memory_metadata = should_write_memory_metadata(client)
     needs_cache_timestamp = (
-        client.retrieval_mode in ("freshness_cache", "cache_then_memory")
-        or client.enable_oracle_memory_metadata
+        client.retrieval_mode in ORACLE_CACHE_RETRIEVAL_MODES
+        or write_memory_metadata
     )
     if not (
         client.enable_oracle_json_payload
         or client.enable_provenance_metadata
-        or client.enable_oracle_memory_metadata
+        or write_memory_metadata
         or client.oracle_upsert_key is not None
         or needs_cache_timestamp
     ):
         return {}
 
-    timestamp = datetime.now(timezone.utc)
+    timestamp = utc_now()
     metadata = {}
 
     if needs_cache_timestamp:
-        metadata[client.cache_timestamp_field] = timestamp
+        metadata[client.cache_timestamp_field] = timestamp.replace(tzinfo=None)
 
     if client.enable_oracle_json_payload:
         payload = {
@@ -520,7 +561,7 @@ def build_persistence_metadata(client, result, query, cache_hit):
             ORACLE_PROVIDER_NAME_FIELD: "tavily",
         })
 
-    if client.enable_oracle_memory_metadata:
+    if write_memory_metadata:
         metadata.update({
             ORACLE_MEMORY_SCOPE_FIELD: client.persistence_depth,
             ORACLE_EXPIRES_AT_FIELD: timestamp + timedelta(seconds=client.cache_ttl_seconds),
@@ -546,8 +587,16 @@ def filter_duplicate_documents(client, documents):
     if client.dedup_similarity_threshold is None:
         return documents
 
+    upsert_key = None
+    if client.oracle_upsert_key is not None:
+        upsert_key = upsert_key_column(client.oracle_upsert_key)
+
     unique_documents = []
     for document in documents:
+        if upsert_key and get_document_value(document, upsert_key):
+            unique_documents.append(document)
+            continue
+
         embedding = get_document_value(document, client.embeddings_field)
         if embedding is None or not is_duplicate(client, embedding):
             unique_documents.append(document)
@@ -701,7 +750,7 @@ def normalize_documents(client, documents):
     return normalized_documents, column_names
 
 
-def insert_normalized_documents(client, normalized_documents, column_names):
+def insert_normalized_documents(client, normalized_documents, column_names, commit=True):
     ordered_columns = order_columns_for_oracle_binds(client, column_names)
     columns = ", ".join(ordered_columns)
     placeholders = ", ".join(f":{column}" for column in ordered_columns)
@@ -713,7 +762,8 @@ def insert_normalized_documents(client, normalized_documents, column_names):
 
     with client.connection.cursor() as cursor:
         cursor.executemany(sql, rows)
-    client.connection.commit()
+    if commit:
+        client.connection.commit()
 
 
 def upsert_documents(client, normalized_documents, column_names):
@@ -727,49 +777,67 @@ def upsert_documents(client, normalized_documents, column_names):
         if not document.get(key_column)
     ]
 
-    if insert_only_documents:
-        insert_normalized_documents(client, insert_only_documents, column_names)
-
     if not upsertable_documents:
+        if insert_only_documents:
+            insert_normalized_documents(client, insert_only_documents, column_names)
         return
 
-    ordered_columns = order_columns_for_oracle_binds(client, column_names)
-    update_columns = [column for column in ordered_columns if column != key_column]
-    update_assignments = [
-        build_upsert_update_assignment(column)
-        for column in update_columns
-    ]
-    insert_columns = ", ".join(ordered_columns)
-    insert_values = ", ".join(f":{column}" for column in ordered_columns)
+    try:
+        if insert_only_documents:
+            insert_normalized_documents(
+                client,
+                insert_only_documents,
+                column_names,
+                commit=False
+            )
 
-    sql = f"""
-        MERGE INTO {client.table_name} target
-        USING (SELECT :{key_column} AS {key_column} FROM DUAL) source
-        ON (target.{key_column} = source.{key_column})
-        WHEN MATCHED THEN UPDATE SET {', '.join(update_assignments)}
-        WHEN NOT MATCHED THEN INSERT ({insert_columns})
-        VALUES ({insert_values})
-    """
-    rows = [
-        {column: document.get(column) for column in ordered_columns}
-        for document in upsertable_documents
-    ]
+        with client.connection.cursor() as cursor:
+            for document in upsertable_documents:
+                ordered_columns = order_columns_for_oracle_binds(
+                    client,
+                    document.keys()
+                )
+                update_columns = [
+                    column for column in ordered_columns
+                    if column != key_column
+                ]
+                update_assignments = [
+                    build_upsert_update_assignment(column)
+                    for column in update_columns
+                ]
+                insert_columns = ", ".join(ordered_columns)
+                insert_values = ", ".join(f":{column}" for column in ordered_columns)
 
-    with client.connection.cursor() as cursor:
-        for row in rows:
-            cursor.execute(sql, **row)
+                sql = f"""
+                    MERGE INTO {client.table_name} target
+                    USING (SELECT :{key_column} AS {key_column} FROM DUAL) source
+                    ON (target.{key_column} = source.{key_column})
+                    WHEN MATCHED THEN UPDATE SET {', '.join(update_assignments)}
+                    WHEN NOT MATCHED THEN INSERT ({insert_columns})
+                    VALUES ({insert_values})
+                """
+                row = {
+                    column: document.get(column)
+                    for column in ordered_columns
+                }
+                cursor.execute(sql, **row)
+    except Exception:
+        if hasattr(client.connection, "rollback"):
+            client.connection.rollback()
+        raise
+
     client.connection.commit()
 
 
 def order_columns_for_oracle_binds(client, column_names):
     """Place LOB/LONG-style columns after regular binds to avoid ORA-24816."""
-    lob_columns = {
-        client.content_field,
-        ORACLE_RAW_PAYLOAD_FIELD,
-    }
+    table_columns = fetch_table_columns(client)
     return sorted(
         column_names,
-        key=lambda column: (column in lob_columns, column)
+        key=lambda column: (
+            _is_lob_or_long_type(table_columns.get(column, "")),
+            column
+        )
     )
 
 
@@ -787,33 +855,90 @@ def build_upsert_update_assignment(column):
     return f"target.{column} = :{column}"
 
 
+def build_unscoped_cache_cleanup_filter(table_columns, execute_kwargs):
+    clauses = []
+    if ORACLE_PROVIDER_NAME_FIELD in table_columns:
+        clauses.append(f"{ORACLE_PROVIDER_NAME_FIELD} = :cleanup_provider_name")
+        execute_kwargs["cleanup_provider_name"] = "tavily"
+    if ORACLE_INSERTED_FROM_FIELD in table_columns:
+        clauses.append(f"{ORACLE_INSERTED_FROM_FIELD} = :cleanup_inserted_from")
+        execute_kwargs["cleanup_inserted_from"] = "tavily"
+    if ORACLE_RETRIEVAL_MODE_FIELD in table_columns:
+        bind_names = []
+        for i, mode in enumerate(ORACLE_CACHE_RETRIEVAL_MODES):
+            bind_name = f"cleanup_retrieval_mode_{i}"
+            bind_names.append(f":{bind_name}")
+            execute_kwargs[bind_name] = mode
+        clauses.append(f"{ORACLE_RETRIEVAL_MODE_FIELD} IN ({', '.join(bind_names)})")
+
+    if not clauses:
+        return ""
+
+    return " OR ".join(f"({clause})" for clause in clauses)
+
+
 def delete_expired_cache_rows(client, cache_ttl_seconds=None):
     if client.db_provider != "oracle":
         raise ValueError("cleanup_cache is only supported when db_provider='oracle'.")
 
     table_columns = fetch_table_columns(client)
-    execute_kwargs = {}
-    if (
+    ttl_seconds = client.cache_ttl_seconds if cache_ttl_seconds is None else cache_ttl_seconds
+    if ttl_seconds <= 0:
+        raise ValueError("cache_ttl_seconds must be greater than 0.")
+
+    execute_kwargs = {
+        "cache_cutoff_timestamp": cache_cutoff_timestamp(ttl_seconds)
+    }
+    has_lifecycle_columns = (
         ORACLE_EXPIRES_AT_FIELD in table_columns
         and ORACLE_MEMORY_SCOPE_FIELD in table_columns
-    ):
+    )
+    has_cache_timestamp = client.cache_timestamp_field in table_columns
+
+    if has_lifecycle_columns and has_cache_timestamp:
+        unscoped_filter = build_unscoped_cache_cleanup_filter(
+            table_columns,
+            execute_kwargs
+        )
+        unscoped_clause = ""
+        if unscoped_filter:
+            unscoped_clause = f"""
+            OR (
+                {ORACLE_MEMORY_SCOPE_FIELD} IS NULL
+                AND {client.cache_timestamp_field} < :cache_cutoff_timestamp
+                AND ({unscoped_filter})
+            )
+            """
+
+        sql = f"""
+            DELETE FROM {client.table_name}
+            WHERE (
+                {ORACLE_MEMORY_SCOPE_FIELD} = :memory_scope
+                AND (
+                    {ORACLE_EXPIRES_AT_FIELD} < :current_timestamp
+                    OR (
+                        {ORACLE_EXPIRES_AT_FIELD} IS NULL
+                        AND {client.cache_timestamp_field} < :cache_cutoff_timestamp
+                    )
+                )
+            )
+            {unscoped_clause}
+        """
+        execute_kwargs["memory_scope"] = "cache_only"
+        execute_kwargs["current_timestamp"] = utc_now()
+    elif has_lifecycle_columns:
         sql = f"""
             DELETE FROM {client.table_name}
             WHERE {ORACLE_MEMORY_SCOPE_FIELD} = :memory_scope
-              AND {ORACLE_EXPIRES_AT_FIELD} < SYSTIMESTAMP
+              AND {ORACLE_EXPIRES_AT_FIELD} < :current_timestamp
         """
         execute_kwargs["memory_scope"] = "cache_only"
+        execute_kwargs["current_timestamp"] = utc_now()
     else:
-        ttl_seconds = client.cache_ttl_seconds if cache_ttl_seconds is None else cache_ttl_seconds
-        if ttl_seconds <= 0:
-            raise ValueError("cache_ttl_seconds must be greater than 0.")
         sql = f"""
             DELETE FROM {client.table_name}
-            WHERE {client.cache_timestamp_field} <
-                  CAST(SYSTIMESTAMP AS TIMESTAMP) -
-                  NUMTODSINTERVAL(:cache_ttl_seconds, 'SECOND')
+            WHERE {client.cache_timestamp_field} < :cache_cutoff_timestamp
         """
-        execute_kwargs["cache_ttl_seconds"] = ttl_seconds
 
     with client.connection.cursor() as cursor:
         cursor.execute(sql, **execute_kwargs)
