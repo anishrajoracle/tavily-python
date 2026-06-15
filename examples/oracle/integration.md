@@ -300,7 +300,7 @@ created = client.ensure_oracle_vector_index()
 print("Created index:", created)
 ```
 
-Oracle local search uses the configured `vector_index_distance` for `VECTOR_DISTANCE(...)`. The same distance setting is also used by semantic deduplication.
+Oracle local hybrid search uses the configured `vector_index_distance` for `VECTOR_DISTANCE(...)`. Cache/memory score thresholds and semantic deduplication currently require `COSINE`, because those controls compare against cosine-style similarity scores.
 
 ## Critical Knobs
 

@@ -175,6 +175,7 @@ Minimum Oracle storage needs content, embeddings, and a timestamp column. Full c
 | Memory fallback does not hit | Check `persistence_depth="cache_plus_memory"`, memory metadata columns, `memory_score_threshold`, and `memory_max_results`. |
 | Save fails with missing columns | Add the optional metadata columns required by the features you enabled. |
 | Duplicate rows grow too quickly | Configure `oracle_upsert_key`, `dedup_similarity_threshold`, `max_persisted_foreign`, or `persist_score_threshold`. |
+| Non-COSINE distance is rejected | Cache/memory thresholds and semantic deduplication require cosine-style similarity scores; use `vector_index_distance="COSINE"` for those features. |
 | Native Oracle hybrid search silently behaves like vector search | Confirm the Oracle Text index exists. If Oracle Text rejects a sanitized query, the provider falls back to vector-only search to keep retrieval working. |
 
 ## Quick Implementation Map

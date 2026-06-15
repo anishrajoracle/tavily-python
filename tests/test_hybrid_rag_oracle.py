@@ -115,6 +115,19 @@ class OracleTextFailingConnection(FakeConnection):
         self.committed = False
 
 
+class FailingExecutemanyCursor(FakeCursor):
+    def executemany(self, sql, rows):
+        self.executemany_call = (sql, rows)
+        raise RuntimeError("insert failed")
+
+
+class FailingExecutemanyConnection(FakeConnection):
+    def __init__(self):
+        self.cursor_instance = FailingExecutemanyCursor()
+        self.committed = False
+        self.rolled_back = False
+
+
 class FakeTavilyClient:
     def __init__(self, results=None):
         self.calls = []
@@ -478,6 +491,30 @@ def test_oracle_insert_schema_validation_rejects_wrong_vector_column_type():
     assert connection.committed is False
 
 
+def test_oracle_insert_rolls_back_when_normal_insert_fails():
+    connection = FailingExecutemanyConnection()
+    client = TavilyHybridClient(
+        api_key="tvly-test",
+        db_provider="oracle",
+        connection=connection,
+        table_name="tavily_documents",
+        embedding_function=lambda texts, _: [[0.1, 0.2, 0.3]],
+        ranking_function=lambda _, documents, __: documents,
+    )
+
+    with pytest.raises(RuntimeError, match="insert failed"):
+        oracle_database.insert_documents(client, [
+            {
+                "content": "foreign content",
+                "embeddings": [0.4, 0.5, 0.6],
+            }
+        ])
+
+    assert connection.cursor_instance.executemany_call is not None
+    assert connection.rolled_back is True
+    assert connection.committed is False
+
+
 def test_oracle_freshness_cache_hit_skips_tavily_and_returns_local_results():
     connection = FakeConnection(rows=[("fresh local content", 0.82, "local")])
     client = TavilyHybridClient(
@@ -502,10 +539,14 @@ def test_oracle_freshness_cache_hit_skips_tavily_and_returns_local_results():
     )
 
     sql, kwargs = connection.cursor_instance.executed
+    assert "EXPIRES_AT > :freshness_current_timestamp" in sql
+    assert "EXPIRES_AT IS NULL" in sql
     assert "ADDED_AT >=" in sql
+    assert ":freshness_current_timestamp" in sql
     assert ":cache_cutoff_timestamp" in sql
+    assert kwargs["freshness_current_timestamp"] is not None
     assert kwargs["cache_cutoff_timestamp"] is not None
-    assert len(connection.cursor_instance.executed_calls) == 1
+    assert len(non_schema_calls(connection)) == 1
     assert connection.cursor_instance.executemany_call is None
     assert results == [
         {"content": "fresh local content", "score": 0.82, "origin": "local"}
@@ -955,13 +996,20 @@ def test_oracle_cleanup_cache_deletes_expired_cache_only_rows():
     assert "EXPIRES_AT < :current_timestamp" in sql
     assert "MEMORY_SCOPE IS NULL" in sql
     assert "ADDED_AT < :cache_cutoff_timestamp" in sql
+    assert "RETRIEVAL_MODE IN (:cleanup_retrieval_mode_0, :cleanup_retrieval_mode_1)" in sql
+    assert "PROVIDER_NAME = :cleanup_provider_name" in sql
+    assert "INSERTED_FROM = :cleanup_inserted_from" in sql
     assert kwargs["memory_scope"] == "cache_only"
     assert kwargs["current_timestamp"] is not None
     assert kwargs["cache_cutoff_timestamp"] is not None
+    assert kwargs["cleanup_retrieval_mode_0"] == "freshness_cache"
+    assert kwargs["cleanup_retrieval_mode_1"] == "cache_then_memory"
+    assert kwargs["cleanup_provider_name"] == "tavily"
+    assert kwargs["cleanup_inserted_from"] == "tavily"
     assert connection.committed is True
 
 
-def test_oracle_cleanup_cache_deletes_legacy_rows_without_memory_scope():
+def test_oracle_cleanup_cache_deletes_legacy_cache_mode_rows_without_memory_scope():
     schema_rows = [
         row for row in DEFAULT_SCHEMA_ROWS
         if row[0] not in {"MEMORY_SCOPE", "EXPIRES_AT"}
@@ -983,8 +1031,39 @@ def test_oracle_cleanup_cache_deletes_legacy_rows_without_memory_scope():
     assert "MEMORY_SCOPE" not in sql
     assert "EXPIRES_AT" not in sql
     assert "ADDED_AT < :cache_cutoff_timestamp" in sql
+    assert "RETRIEVAL_MODE IN (:cleanup_retrieval_mode_0, :cleanup_retrieval_mode_1)" in sql
+    assert "PROVIDER_NAME = :cleanup_provider_name" in sql
+    assert "INSERTED_FROM = :cleanup_inserted_from" in sql
     assert kwargs["cache_cutoff_timestamp"] is not None
+    assert kwargs["cleanup_retrieval_mode_0"] == "freshness_cache"
+    assert kwargs["cleanup_retrieval_mode_1"] == "cache_then_memory"
     assert connection.committed is True
+
+
+def test_oracle_cleanup_cache_skips_legacy_rows_without_provenance_scope():
+    schema_rows = [
+        ("ADDED_AT", "TIMESTAMP"),
+        ("CONTENT", "CLOB"),
+        ("EMBEDDINGS", "VECTOR"),
+    ]
+    connection = FakeConnection(rowcount=5, schema_rows=schema_rows)
+    client = TavilyHybridClient(
+        api_key="tvly-test",
+        db_provider="oracle",
+        connection=connection,
+        table_name="tavily_documents",
+        embedding_function=lambda texts, _: [[0.1, 0.2, 0.3]],
+        ranking_function=lambda _, documents, __: documents,
+    )
+
+    deleted_rows = client.cleanup_cache(cache_ttl_seconds=120)
+
+    assert deleted_rows == 0
+    assert not any(
+        "DELETE FROM TAVILY_DOCUMENTS" in sql
+        for sql, _kwargs in connection.cursor_instance.executed_calls
+    )
+    assert connection.committed is False
 
 
 def test_oracle_auto_cleanup_runs_before_search_once_per_interval():
@@ -1130,6 +1209,66 @@ def test_oracle_semantic_dedup_skips_near_duplicate_foreign_insert():
     assert connection.cursor_instance.executemany_call is None
     assert connection.committed is False
     assert "FETCH FIRST 1 ROWS ONLY" in connection.cursor_instance.executed_calls[-1][0]
+
+
+def test_oracle_semantic_dedup_is_scoped_to_tavily_rows_and_live_cache():
+    connection = FakeConnection(rows=[], fetchone_results=[(0.99,)])
+    client = TavilyHybridClient(
+        api_key="tvly-test",
+        db_provider="oracle",
+        connection=connection,
+        table_name="tavily_documents",
+        dedup_similarity_threshold=0.95,
+        oracle_metadata_filters={"provider_name": "tavily"},
+        embedding_function=lambda texts, _: [[0.7, 0.8, 0.9] for _ in texts],
+        ranking_function=lambda _, documents, __: documents,
+    )
+    client.tavily = FakeTavilyClient()
+
+    client.search(
+        "test query",
+        max_local=0,
+        max_foreign=1,
+        save_foreign=True,
+    )
+
+    sql, kwargs = connection.cursor_instance.executed_calls[-1]
+    assert "PROVIDER_NAME = :metadata_filter_0" in sql
+    assert "PROVIDER_NAME = :dedup_provider_name" in sql
+    assert "INSERTED_FROM = :dedup_inserted_from" in sql
+    assert "MEMORY_SCOPE <> :dedup_cache_only_scope" in sql
+    assert "EXPIRES_AT > :dedup_current_timestamp" in sql
+    assert kwargs["metadata_filter_0"] == "tavily"
+    assert kwargs["dedup_provider_name"] == "tavily"
+    assert kwargs["dedup_inserted_from"] == "tavily"
+    assert kwargs["dedup_cache_only_scope"] == "cache_only"
+    assert kwargs["dedup_current_timestamp"] is not None
+
+
+def test_oracle_cache_and_dedup_similarity_thresholds_require_cosine_distance():
+    with pytest.raises(ValueError, match="require vector_index_distance='COSINE'"):
+        TavilyHybridClient(
+            api_key="tvly-test",
+            db_provider="oracle",
+            connection=FakeConnection(),
+            table_name="tavily_documents",
+            retrieval_mode="freshness_cache",
+            vector_index_distance="DOT",
+            embedding_function=lambda texts, _: [[0.1, 0.2, 0.3]],
+            ranking_function=lambda _, documents, __: documents,
+        )
+
+    with pytest.raises(ValueError, match="require vector_index_distance='COSINE'"):
+        TavilyHybridClient(
+            api_key="tvly-test",
+            db_provider="oracle",
+            connection=FakeConnection(),
+            table_name="tavily_documents",
+            vector_index_distance="DOT",
+            dedup_similarity_threshold=0.95,
+            embedding_function=lambda texts, _: [[0.1, 0.2, 0.3]],
+            ranking_function=lambda _, documents, __: documents,
+        )
 
 
 def test_oracle_rejects_unsafe_identifiers():

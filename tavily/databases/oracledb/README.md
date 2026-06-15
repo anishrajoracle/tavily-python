@@ -90,7 +90,7 @@ Oracle local vector score uses the configured vector distance metric. By default
 
 This is a ranking signal, not a probability. A local score like `0.5` does not mean "50 percent correct." It means the query vector and stored vector are close enough under the chosen embedding model and distance metric to be useful for ranking.
 
-If you pass a different `vector_index_distance`, Oracle local search and semantic deduplication use that metric too. Tavily result scores and Oracle vector scores are not guaranteed to be calibrated to the same scale. The configured `ranking_function` decides how merged results are sorted.
+If you pass a different `vector_index_distance`, Oracle local hybrid search uses that metric for `VECTOR_DISTANCE(...)`. Cache/memory thresholds and semantic deduplication currently require `COSINE`, because their thresholds assume a cosine-style similarity score. Tavily result scores and Oracle vector scores are not guaranteed to be calibrated to the same scale. The configured `ranking_function` decides how merged results are sorted.
 
 ## Native Oracle Text Hybrid Search
 

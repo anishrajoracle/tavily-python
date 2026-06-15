@@ -172,6 +172,40 @@ def test_rejects_invalid_persistence_controls():
             ranking_function=lambda _, documents, __: documents,
         )
 
+    with pytest.raises(ValueError, match="persist_score_threshold must be finite"):
+        TavilyHybridClient(
+            api_key="tvly-test",
+            db_provider="mongodb",
+            collection=FakeMongoCollection(),
+            index="vector_search",
+            persist_score_threshold="nan",
+            embedding_function=lambda texts, _: [[0.1, 0.2, 0.3] for _ in texts],
+            ranking_function=lambda _, documents, __: documents,
+        )
+
+    with pytest.raises(ValueError, match="cache_score_threshold must be finite"):
+        TavilyHybridClient(
+            api_key="tvly-test",
+            db_provider="oracle",
+            connection=object(),
+            table_name="tavily_documents",
+            retrieval_mode="freshness_cache",
+            cache_score_threshold="nan",
+            embedding_function=lambda texts, _: [[0.1, 0.2, 0.3] for _ in texts],
+            ranking_function=lambda _, documents, __: documents,
+        )
+
+    with pytest.raises(ValueError, match="dedup_similarity_threshold must be finite"):
+        TavilyHybridClient(
+            api_key="tvly-test",
+            db_provider="oracle",
+            connection=object(),
+            table_name="tavily_documents",
+            dedup_similarity_threshold="inf",
+            embedding_function=lambda texts, _: [[0.1, 0.2, 0.3] for _ in texts],
+            ranking_function=lambda _, documents, __: documents,
+        )
+
 
 def test_mongodb_convenience_connection_params_create_collection(monkeypatch):
     created = {}

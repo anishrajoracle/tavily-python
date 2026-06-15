@@ -291,7 +291,7 @@ def search_vector(client, query_embeddings, max_local, cache_ttl_seconds=None,
     vector_distance = vector_distance_expression(client)
     execute_kwargs = {"query_vector": to_vector(query_embeddings)}
     freshness_filter = build_freshness_filter(
-        client.cache_timestamp_field,
+        client,
         cache_ttl_seconds,
         execute_kwargs
     )
@@ -368,7 +368,7 @@ def search_native_hybrid(client, query_embeddings, max_local, query,
         "text_query": text_query,
     }
     freshness_filter = build_freshness_filter(
-        client.cache_timestamp_field,
+        client,
         cache_ttl_seconds,
         execute_kwargs
     )
@@ -433,12 +433,37 @@ def search_native_hybrid(client, query_embeddings, max_local, query,
         ]
 
 
-def build_freshness_filter(cache_timestamp_field, cache_ttl_seconds, execute_kwargs):
+def build_freshness_filter(client, cache_ttl_seconds, execute_kwargs):
     if cache_ttl_seconds is None:
         return ""
 
+    table_columns = fetch_table_columns(client)
+    has_expires_at = ORACLE_EXPIRES_AT_FIELD in table_columns
+    has_cache_timestamp = client.cache_timestamp_field in table_columns
+
+    if has_expires_at:
+        execute_kwargs["freshness_current_timestamp"] = utc_now()
+        if has_cache_timestamp:
+            execute_kwargs["cache_cutoff_timestamp"] = cache_cutoff_timestamp(cache_ttl_seconds)
+            return (
+                f"AND ("
+                f"{ORACLE_EXPIRES_AT_FIELD} > :freshness_current_timestamp "
+                f"OR ("
+                f"{ORACLE_EXPIRES_AT_FIELD} IS NULL "
+                f"AND {client.cache_timestamp_field} >= :cache_cutoff_timestamp"
+                f")"
+                f")"
+            )
+        return f"AND {ORACLE_EXPIRES_AT_FIELD} > :freshness_current_timestamp"
+
+    if not has_cache_timestamp:
+        raise ValueError(
+            f"Oracle table {client.table_name} is missing {client.cache_timestamp_field}. "
+            "Add the cache timestamp column before using freshness cache TTL."
+        )
+
     execute_kwargs["cache_cutoff_timestamp"] = cache_cutoff_timestamp(cache_ttl_seconds)
-    return f"AND {cache_timestamp_field} >= :cache_cutoff_timestamp"
+    return f"AND {client.cache_timestamp_field} >= :cache_cutoff_timestamp"
 
 
 def build_metadata_filter(oracle_metadata_filters, execute_kwargs):
@@ -612,22 +637,59 @@ def get_document_value(document, column_name):
 
 def is_duplicate(client, embedding):
     vector_distance = vector_distance_expression(client)
+    execute_kwargs = {"query_vector": to_vector(embedding)}
+    metadata_filter = build_metadata_filter(client.oracle_metadata_filters, execute_kwargs)
+    dedup_filter = build_dedup_scope_filter(client, execute_kwargs)
     sql = f"""
             SELECT 1 - {vector_distance} AS score
             FROM {client.table_name}
             WHERE {client.embeddings_field} IS NOT NULL
+              {metadata_filter}
+              {dedup_filter}
             ORDER BY {vector_distance}
             FETCH FIRST 1 ROWS ONLY
         """
 
     with client.connection.cursor() as cursor:
-        cursor.execute(sql, query_vector=to_vector(embedding))
+        cursor.execute(sql, **execute_kwargs)
         row = cursor.fetchone()
 
     if row is None:
         return False
 
     return row[0] >= client.dedup_similarity_threshold
+
+
+def build_dedup_scope_filter(client, execute_kwargs):
+    table_columns = fetch_table_columns(client)
+    clauses = []
+
+    if ORACLE_PROVIDER_NAME_FIELD in table_columns:
+        clauses.append(f"{ORACLE_PROVIDER_NAME_FIELD} = :dedup_provider_name")
+        execute_kwargs["dedup_provider_name"] = "tavily"
+    if ORACLE_INSERTED_FROM_FIELD in table_columns:
+        clauses.append(f"{ORACLE_INSERTED_FROM_FIELD} = :dedup_inserted_from")
+        execute_kwargs["dedup_inserted_from"] = "tavily"
+
+    if (
+        ORACLE_MEMORY_SCOPE_FIELD in table_columns
+        and ORACLE_EXPIRES_AT_FIELD in table_columns
+    ):
+        clauses.append(
+            f"("
+            f"{ORACLE_MEMORY_SCOPE_FIELD} IS NULL "
+            f"OR {ORACLE_MEMORY_SCOPE_FIELD} <> :dedup_cache_only_scope "
+            f"OR {ORACLE_EXPIRES_AT_FIELD} IS NULL "
+            f"OR {ORACLE_EXPIRES_AT_FIELD} > :dedup_current_timestamp"
+            f")"
+        )
+        execute_kwargs["dedup_cache_only_scope"] = "cache_only"
+        execute_kwargs["dedup_current_timestamp"] = utc_now()
+
+    if not clauses:
+        return ""
+
+    return "AND " + " AND ".join(clauses)
 
 
 def ensure_vector_index(client, index_name=None):
@@ -760,10 +822,15 @@ def insert_normalized_documents(client, normalized_documents, column_names, comm
         for document in normalized_documents
     ]
 
-    with client.connection.cursor() as cursor:
-        cursor.executemany(sql, rows)
-    if commit:
-        client.connection.commit()
+    try:
+        with client.connection.cursor() as cursor:
+            cursor.executemany(sql, rows)
+        if commit:
+            client.connection.commit()
+    except Exception:
+        if hasattr(client.connection, "rollback"):
+            client.connection.rollback()
+        raise
 
 
 def upsert_documents(client, normalized_documents, column_names):
@@ -856,25 +923,27 @@ def build_upsert_update_assignment(column):
 
 
 def build_unscoped_cache_cleanup_filter(table_columns, execute_kwargs):
-    clauses = []
-    if ORACLE_PROVIDER_NAME_FIELD in table_columns:
-        clauses.append(f"{ORACLE_PROVIDER_NAME_FIELD} = :cleanup_provider_name")
-        execute_kwargs["cleanup_provider_name"] = "tavily"
-    if ORACLE_INSERTED_FROM_FIELD in table_columns:
-        clauses.append(f"{ORACLE_INSERTED_FROM_FIELD} = :cleanup_inserted_from")
-        execute_kwargs["cleanup_inserted_from"] = "tavily"
     if ORACLE_RETRIEVAL_MODE_FIELD in table_columns:
         bind_names = []
         for i, mode in enumerate(ORACLE_CACHE_RETRIEVAL_MODES):
             bind_name = f"cleanup_retrieval_mode_{i}"
             bind_names.append(f":{bind_name}")
             execute_kwargs[bind_name] = mode
-        clauses.append(f"{ORACLE_RETRIEVAL_MODE_FIELD} IN ({', '.join(bind_names)})")
+        clauses = [f"{ORACLE_RETRIEVAL_MODE_FIELD} IN ({', '.join(bind_names)})"]
+    else:
+        return ""
+
+    if ORACLE_PROVIDER_NAME_FIELD in table_columns:
+        clauses.append(f"{ORACLE_PROVIDER_NAME_FIELD} = :cleanup_provider_name")
+        execute_kwargs["cleanup_provider_name"] = "tavily"
+    if ORACLE_INSERTED_FROM_FIELD in table_columns:
+        clauses.append(f"{ORACLE_INSERTED_FROM_FIELD} = :cleanup_inserted_from")
+        execute_kwargs["cleanup_inserted_from"] = "tavily"
 
     if not clauses:
         return ""
 
-    return " OR ".join(f"({clause})" for clause in clauses)
+    return " AND ".join(f"({clause})" for clause in clauses)
 
 
 def delete_expired_cache_rows(client, cache_ttl_seconds=None):
@@ -895,7 +964,12 @@ def delete_expired_cache_rows(client, cache_ttl_seconds=None):
     )
     has_cache_timestamp = client.cache_timestamp_field in table_columns
 
-    if has_lifecycle_columns and has_cache_timestamp:
+    if has_lifecycle_columns:
+        legacy_timestamp_condition = (
+            f"{client.cache_timestamp_field} < :cache_cutoff_timestamp"
+            if has_cache_timestamp
+            else "1 = 0"
+        )
         unscoped_filter = build_unscoped_cache_cleanup_filter(
             table_columns,
             execute_kwargs
@@ -905,7 +979,13 @@ def delete_expired_cache_rows(client, cache_ttl_seconds=None):
             unscoped_clause = f"""
             OR (
                 {ORACLE_MEMORY_SCOPE_FIELD} IS NULL
-                AND {client.cache_timestamp_field} < :cache_cutoff_timestamp
+                AND (
+                    {ORACLE_EXPIRES_AT_FIELD} < :current_timestamp
+                    OR (
+                        {ORACLE_EXPIRES_AT_FIELD} IS NULL
+                        AND {legacy_timestamp_condition}
+                    )
+                )
                 AND ({unscoped_filter})
             )
             """
@@ -918,7 +998,7 @@ def delete_expired_cache_rows(client, cache_ttl_seconds=None):
                     {ORACLE_EXPIRES_AT_FIELD} < :current_timestamp
                     OR (
                         {ORACLE_EXPIRES_AT_FIELD} IS NULL
-                        AND {client.cache_timestamp_field} < :cache_cutoff_timestamp
+                        AND {legacy_timestamp_condition}
                     )
                 )
             )
@@ -926,19 +1006,28 @@ def delete_expired_cache_rows(client, cache_ttl_seconds=None):
         """
         execute_kwargs["memory_scope"] = "cache_only"
         execute_kwargs["current_timestamp"] = utc_now()
-    elif has_lifecycle_columns:
+    elif ORACLE_MEMORY_SCOPE_FIELD in table_columns and has_cache_timestamp:
         sql = f"""
             DELETE FROM {client.table_name}
             WHERE {ORACLE_MEMORY_SCOPE_FIELD} = :memory_scope
-              AND {ORACLE_EXPIRES_AT_FIELD} < :current_timestamp
+              AND {client.cache_timestamp_field} < :cache_cutoff_timestamp
         """
         execute_kwargs["memory_scope"] = "cache_only"
-        execute_kwargs["current_timestamp"] = utc_now()
-    else:
+    elif has_cache_timestamp:
+        unscoped_filter = build_unscoped_cache_cleanup_filter(
+            table_columns,
+            execute_kwargs
+        )
+        if not unscoped_filter:
+            return 0
+
         sql = f"""
             DELETE FROM {client.table_name}
             WHERE {client.cache_timestamp_field} < :cache_cutoff_timestamp
+              AND ({unscoped_filter})
         """
+    else:
+        return 0
 
     with client.connection.cursor() as cursor:
         cursor.execute(sql, **execute_kwargs)

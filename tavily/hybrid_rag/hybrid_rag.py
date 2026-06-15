@@ -1,3 +1,4 @@
+from math import isfinite
 from typing import Callable, Literal, Optional, Sequence, Union
 from time import monotonic
 
@@ -11,6 +12,16 @@ from tavily.databases.config import PERSISTENCE_DEPTHS, RETRIEVAL_MODES
 from tavily.databases.oracledb.oracle_config import ORACLE_CACHE_TIMESTAMP_FIELD
 from tavily.hybrid_rag.embeddings import cohere_embed, cohere_rerank
 from tavily.hybrid_rag import retrieval_modes
+
+
+def _finite_float(value, name):
+    try:
+        parsed = float(value)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"{name} must be a number.") from exc
+    if not isfinite(parsed):
+        raise ValueError(f"{name} must be finite.")
+    return parsed
 
 
 class TavilyHybridClient():
@@ -162,10 +173,10 @@ class TavilyHybridClient():
             if cache_ttl_seconds <= 0:
                 raise ValueError("cache_ttl_seconds must be greater than 0.")
         if db_provider == 'oracle' and retrieval_mode in ('freshness_cache', 'cache_then_memory'):
-            try:
-                cache_score_threshold = float(cache_score_threshold)
-            except (TypeError, ValueError) as exc:
-                raise ValueError("cache_score_threshold must be a number.") from exc
+            cache_score_threshold = _finite_float(
+                cache_score_threshold,
+                "cache_score_threshold"
+            )
         if db_provider == 'oracle' and retrieval_mode == 'cache_then_memory':
             enable_oracle_memory_metadata = True
         if persistence_depth is None:
@@ -178,10 +189,10 @@ class TavilyHybridClient():
                 raise ValueError(
                     "persistence_depth must be 'cache_only' or 'cache_plus_memory'."
                 )
-            try:
-                memory_score_threshold = float(memory_score_threshold)
-            except (TypeError, ValueError) as exc:
-                raise ValueError("memory_score_threshold must be a number.") from exc
+            memory_score_threshold = _finite_float(
+                memory_score_threshold,
+                "memory_score_threshold"
+            )
             if memory_max_results is not None and memory_max_results <= 0:
                 raise ValueError("memory_max_results must be greater than 0.")
             if oracle_upsert_key not in (None, "source_url", "content_hash"):
@@ -191,10 +202,10 @@ class TavilyHybridClient():
         if max_persisted_foreign is not None and max_persisted_foreign <= 0:
             raise ValueError("max_persisted_foreign must be greater than 0.")
         if persist_score_threshold is not None:
-            try:
-                persist_score_threshold = float(persist_score_threshold)
-            except (TypeError, ValueError) as exc:
-                raise ValueError("persist_score_threshold must be a number.") from exc
+            persist_score_threshold = _finite_float(
+                persist_score_threshold,
+                "persist_score_threshold"
+            )
         if auto_cleanup_cache and db_provider != 'oracle':
             raise ValueError("auto_cleanup_cache is only supported when db_provider='oracle'.")
         if auto_cleanup_cache and cache_cleanup_interval_seconds <= 0:
@@ -256,10 +267,18 @@ class TavilyHybridClient():
             self.vector_index_type = oracle_database.validate_vector_index_type(vector_index_type)
             self.vector_index_distance = oracle_database.validate_vector_distance(vector_index_distance)
             if dedup_similarity_threshold is not None:
-                try:
-                    self.dedup_similarity_threshold = float(dedup_similarity_threshold)
-                except (TypeError, ValueError) as exc:
-                    raise ValueError("dedup_similarity_threshold must be a number.") from exc
+                self.dedup_similarity_threshold = _finite_float(
+                    dedup_similarity_threshold,
+                    "dedup_similarity_threshold"
+                )
+            if self.vector_index_distance != "COSINE" and (
+                retrieval_mode in ("freshness_cache", "cache_then_memory")
+                or self.dedup_similarity_threshold is not None
+            ):
+                raise ValueError(
+                    "Oracle cache/memory thresholds and semantic deduplication "
+                    "currently require vector_index_distance='COSINE'."
+                )
 
         self.embedding_function = cohere_embed if embedding_function is None else embedding_function
         self.ranking_function = cohere_rerank if ranking_function is None else ranking_function
