@@ -740,6 +740,37 @@ def ensure_vector_index(client, index_name=None):
     return True
 
 
+def ensure_text_index(client, index_name=None):
+    if client.db_provider != "oracle":
+        raise ValueError("ensure_oracle_text_index is only supported when db_provider='oracle'.")
+
+    table_name = validate_identifier(client.table_name, "table_name")
+    content_field = validate_identifier(client.content_field, "content_field")
+    index_name = index_name or getattr(client, "text_index_name", None)
+    if index_name is None:
+        index_name = f"{table_name}_{content_field}_TEXT_IDX"
+    index_name = validate_identifier(index_name, "index_name")
+
+    with client.connection.cursor() as cursor:
+        cursor.execute(
+            "SELECT COUNT(*) FROM USER_INDEXES WHERE INDEX_NAME = :index_name",
+            index_name=index_name
+        )
+        if cursor.fetchone()[0] > 0:
+            return False
+
+        cursor.execute(
+            f"""
+                CREATE INDEX {index_name}
+                ON {table_name}({content_field})
+                INDEXTYPE IS CTXSYS.CONTEXT
+            """
+        )
+
+    client.connection.commit()
+    return True
+
+
 def vector_index_parameters(client):
     if client.vector_index_type == "HNSW":
         return json.dumps({

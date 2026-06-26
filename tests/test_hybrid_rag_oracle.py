@@ -1183,6 +1183,51 @@ def test_oracle_vector_index_helper_skips_existing_index():
     assert len(connection.cursor_instance.executed_calls) == 1
 
 
+def test_oracle_text_index_helper_creates_index_when_missing():
+    connection = FakeConnection(fetchone_results=[(0,)])
+    client = TavilyHybridClient(
+        api_key="tvly-test",
+        db_provider="oracle",
+        connection=connection,
+        table_name="tavily_documents",
+        text_index_name="tavily_docs_text_idx",
+        embedding_function=lambda texts, _: [[0.1, 0.2, 0.3]],
+        ranking_function=lambda _, documents, __: documents,
+    )
+
+    created = client.ensure_oracle_text_index()
+
+    assert created is True
+    assert connection.committed is True
+    lookup_sql, lookup_kwargs = connection.cursor_instance.executed_calls[0]
+    create_sql, create_kwargs = connection.cursor_instance.executed_calls[-1]
+    assert "USER_INDEXES" in lookup_sql
+    assert lookup_kwargs["index_name"] == "TAVILY_DOCS_TEXT_IDX"
+    assert "CREATE INDEX TAVILY_DOCS_TEXT_IDX" in create_sql
+    assert "ON TAVILY_DOCUMENTS(CONTENT)" in create_sql
+    assert "INDEXTYPE IS CTXSYS.CONTEXT" in create_sql
+    assert create_kwargs == {}
+
+
+def test_oracle_text_index_helper_skips_existing_index():
+    connection = FakeConnection(fetchone_results=[(1,)])
+    client = TavilyHybridClient(
+        api_key="tvly-test",
+        db_provider="oracle",
+        connection=connection,
+        table_name="tavily_documents",
+        text_index_name="tavily_docs_text_idx",
+        embedding_function=lambda texts, _: [[0.1, 0.2, 0.3]],
+        ranking_function=lambda _, documents, __: documents,
+    )
+
+    created = client.ensure_oracle_text_index()
+
+    assert created is False
+    assert connection.committed is False
+    assert len(connection.cursor_instance.executed_calls) == 1
+
+
 def test_oracle_semantic_dedup_skips_near_duplicate_foreign_insert():
     connection = FakeConnection(rows=[], fetchone_results=[(0.99,)])
     client = TavilyHybridClient(

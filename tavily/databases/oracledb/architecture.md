@@ -38,7 +38,7 @@ Returned rows use an origin marker:
 | --- | --- | --- |
 | `TavilyHybridClient.search(...)` | Orchestrates query embedding, mode dispatch, Tavily calls, ranking, and persistence. | `tavily/hybrid_rag/hybrid_rag.py` |
 | `retrieval_modes` | Holds Oracle-specific routing for freshness cache and cache-then-memory. | `tavily/hybrid_rag/retrieval_modes.py` |
-| Oracle provider | Executes vector search, freshness filters, metadata filters, inserts, upserts, cleanup, and vector index helpers. | `tavily/databases/oracledb/oracledb.py` |
+| Oracle provider | Executes vector/search hybrid retrieval, freshness filters, metadata filters, inserts, upserts, cleanup, and index helpers. | `tavily/databases/oracledb/oracledb.py` |
 | Embedding function | Converts query text and saved Tavily content into vectors. Defaults to Cohere helpers unless a custom callable is supplied. | `tavily/hybrid_rag/embeddings.py` |
 | Ranking function | Sorts merged local and foreign candidates in `hybrid_search`. Defaults to Cohere reranking unless a custom callable is supplied. | `tavily/hybrid_rag/embeddings.py` |
 
@@ -63,7 +63,7 @@ Use `hybrid_search` when the response should combine local Oracle memory with fr
 - Tavily being called repeatedly is expected in this mode when `max_foreign > 0`.
 - Set `max_foreign=0` for a local-only retrieval pass.
 - Use `persistence_depth="cache_plus_memory"` when saved Tavily rows should be reusable as durable memory.
-- Use `enable_native_hybrid_search=True` only when the Oracle table has an Oracle Text index. The provider sanitizes the Oracle Text query and falls back to vector-only search if Oracle Text rejects it.
+- Use `ensure_oracle_text_index()` before `enable_native_hybrid_search=True` when the Oracle table still needs an Oracle Text index. The provider sanitizes the Oracle Text query and falls back to vector-only search if Oracle Text rejects it.
 
 ## 2. `freshness_cache`
 
@@ -176,7 +176,7 @@ Minimum Oracle storage needs content, embeddings, and a timestamp column. Full c
 | Save fails with missing columns | Add the optional metadata columns required by the features you enabled. |
 | Duplicate rows grow too quickly | Configure `oracle_upsert_key`, `dedup_similarity_threshold`, `max_persisted_foreign`, or `persist_score_threshold`. |
 | Non-COSINE distance is rejected | Cache/memory thresholds and semantic deduplication require cosine-style similarity scores; use `vector_index_distance="COSINE"` for those features. |
-| Native Oracle hybrid search silently behaves like vector search | Confirm the Oracle Text index exists. If Oracle Text rejects a sanitized query, the provider falls back to vector-only search to keep retrieval working. |
+| Native Oracle hybrid search silently behaves like vector search | Confirm `ensure_oracle_text_index()` has been called for the configured content column. If Oracle Text rejects a sanitized query, the provider falls back to vector-only search to keep retrieval working. |
 
 ## Quick Implementation Map
 

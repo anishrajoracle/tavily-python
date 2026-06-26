@@ -258,15 +258,7 @@ WHERE raw_payload IS NOT NULL;
 
 Oracle local retrieval can combine vector similarity with Oracle Text scoring.
 
-First create an Oracle Text index:
-
-```sql
-CREATE INDEX tavily_docs_text_idx
-ON tavily_documents(content)
-INDEXTYPE IS CTXSYS.CONTEXT;
-```
-
-Then enable native hybrid search:
+Create or verify the Oracle Text index through the SDK helper, then enable native hybrid search:
 
 ```python
 client = TavilyHybridClient(
@@ -275,9 +267,15 @@ client = TavilyHybridClient(
     connection=connection,
     table_name="TAVILY_DOCUMENTS",
     retrieval_mode="hybrid_search",
+    text_index_name="TAVILY_DOCS_TEXT_IDX",
     enable_native_hybrid_search=True,
 )
+
+created = client.ensure_oracle_text_index()
+print("Created text index:", created)
 ```
+
+`ensure_oracle_text_index()` returns `True` when it creates the index and `False` when the configured index already exists. If `text_index_name` is omitted, the helper uses `{TABLE_NAME}_{CONTENT_FIELD}_TEXT_IDX`.
 
 Use this when your local Oracle table has enough content for both lexical and semantic matching. The provider sanitizes free-form user questions before routing them into Oracle Text. If Oracle Text still rejects a query at runtime, the provider falls back to vector-only Oracle search so the request can continue.
 

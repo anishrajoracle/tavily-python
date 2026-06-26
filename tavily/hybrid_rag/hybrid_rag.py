@@ -70,7 +70,8 @@ class TavilyHybridClient():
             mongo_collection: Optional[str] = None,
             mongo_client_kwargs: Optional[dict] = None,
             auto_cleanup_cache: bool = False,
-            cache_cleanup_interval_seconds: int = 3600
+            cache_cleanup_interval_seconds: int = 3600,
+            text_index_name: Optional[str] = None
         ):
         '''
         A client for performing hybrid RAG using both the Tavily API and a local database.
@@ -99,6 +100,7 @@ class TavilyHybridClient():
         oracle_metadata_filters (dict): Optional Oracle column filters applied during local Oracle search.
         enable_oracle_json_payload (bool): If True, Oracle save_foreign=True writes RAW_PAYLOAD JSON.
         enable_provenance_metadata (bool): If True, Oracle save_foreign=True writes provenance columns.
+        text_index_name (str): Optional Oracle Text index name used by ensure_oracle_text_index().
         vector_index_name (str): Optional Oracle vector index name used by ensure_oracle_vector_index().
         vector_index_type (str): Oracle vector index type, 'HNSW' or 'IVF'.
         vector_index_distance (str): Oracle vector index distance metric.
@@ -227,6 +229,7 @@ class TavilyHybridClient():
         self.oracle_metadata_filters = oracle_metadata_filters or {}
         self.enable_oracle_json_payload = enable_oracle_json_payload
         self.enable_provenance_metadata = enable_provenance_metadata
+        self.text_index_name = text_index_name
         self.vector_index_name = vector_index_name
         self.vector_index_type = vector_index_type
         self.vector_index_distance = vector_index_distance
@@ -264,6 +267,8 @@ class TavilyHybridClient():
             )
             if vector_index_name is not None:
                 self.vector_index_name = oracle_database.validate_identifier(vector_index_name, "vector_index_name")
+            if text_index_name is not None:
+                self.text_index_name = oracle_database.validate_identifier(text_index_name, "text_index_name")
             self.vector_index_type = oracle_database.validate_vector_index_type(vector_index_type)
             self.vector_index_distance = oracle_database.validate_vector_distance(vector_index_distance)
             if dedup_similarity_threshold is not None:
@@ -439,6 +444,9 @@ class TavilyHybridClient():
 
     def ensure_oracle_vector_index(self, index_name=None):
         return oracle_database.ensure_vector_index(self, index_name=index_name)
+
+    def ensure_oracle_text_index(self, index_name=None):
+        return oracle_database.ensure_text_index(self, index_name=index_name)
 
     def cleanup_cache(self, cache_ttl_seconds=None):
         return oracle_database.delete_expired_cache_rows(

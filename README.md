@@ -337,7 +337,7 @@ Common setup issues are usually configuration-related:
 | Vector search errors | Confirm the target collection/table has compatible embedding data and the configured vector index/search fields match your schema. |
 | Insert/persistence errors | Confirm the provider schema contains the fields required by the options you enabled. |
 
-For Oracle-specific cache, memory, JSON, provenance, vector-index, and cleanup details, see [tavily/databases/oracledb/README.md](tavily/databases/oracledb/README.md).
+For Oracle-specific cache, memory, JSON, provenance, vector/text-index, and cleanup details, see [tavily/databases/oracledb/README.md](tavily/databases/oracledb/README.md).
 
 ## Contributing Guide
 

@@ -94,13 +94,23 @@ If you pass a different `vector_index_distance`, Oracle local hybrid search uses
 
 ## Native Oracle Text Hybrid Search
 
-`enable_native_hybrid_search=True` combines Oracle Vector Search with Oracle Text scoring. It requires an Oracle Text index on the content column:
+`enable_native_hybrid_search=True` combines Oracle Vector Search with Oracle Text scoring. It requires an Oracle Text index on the content column, which can be created or verified through the SDK helper:
 
-```sql
-CREATE INDEX tavily_docs_text_idx
-ON tavily_documents(content)
-INDEXTYPE IS CTXSYS.CONTEXT;
+```python
+client = TavilyHybridClient(
+    api_key=os.environ["TAVILY_API_KEY"],
+    db_provider="oracle",
+    connection=connection,
+    table_name="TAVILY_DOCUMENTS",
+    text_index_name="TAVILY_DOCS_TEXT_IDX",
+    enable_native_hybrid_search=True,
+)
+
+created = client.ensure_oracle_text_index()
+print("Created text index:", created)
 ```
+
+`ensure_oracle_text_index()` returns `True` when it creates the index and `False` when the configured index already exists. If `text_index_name` is omitted, the helper uses `{TABLE_NAME}_{CONTENT_FIELD}_TEXT_IDX`.
 
 When native hybrid search is enabled, the provider sanitizes the text query before passing it into Oracle Text. If Oracle Text still rejects the query at runtime, the provider falls back to vector-only Oracle search instead of failing the whole request. The demo notebooks keep `enable_native_hybrid_search=False` by default because vector-only local search is simpler to run in every environment.
 
@@ -136,7 +146,8 @@ The focused Oracle notebooks live in `examples/oracle`.
 | `oracle_tavily_mode_freshness_cache.ipynb` | First run misses local cache and calls Tavily; second run hits fresh Oracle cache. |
 | `oracle_tavily_mode_cache_then_memory.ipynb` | First run calls Tavily; after TTL expiry, second run uses durable Oracle memory. |
 | `oracle_tavily_evaluation_metrics.ipynb` | Compact latency, origin, and row-count metrics across all retrieval modes. |
-| `oracle_tavily_ai_features.ipynb` | JSON payloads, provenance, upsert, persistence caps, score thresholds, semantic deduplication, cleanup, and vector-index helper behavior. |
+| `oracle_tavily_ai_features.ipynb` | JSON payloads, provenance, upsert, persistence caps, score thresholds, semantic deduplication, cleanup, and index-helper behavior. |
+| `oracle_tavily_index_helpers.ipynb` | Real Oracle Text and vector index helper demo with missing-index preflight output, metadata verification, and cleanup. |
 
 Each focused notebook has a clearly marked query cell and a final cleanup cell. The cleanup keeps repeated runs predictable, so the first run can demonstrate Tavily fallback and later runs can demonstrate Oracle reuse.
 
