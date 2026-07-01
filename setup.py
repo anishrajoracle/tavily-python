@@ -15,8 +15,9 @@ setup(
     packages=find_packages(exclude=['tests']),
     install_requires=['requests', 'tiktoken>=0.5.1', 'httpx'],
     extras_require={
-        'oracle': ['oracledb'],
-        'mongodb': ['pymongo'],
+        'hybrid': ['cohere'],
+        'oracle': ['oracledb', 'cohere'],
+        'mongodb': ['pymongo', 'cohere'],
     },
     classifiers=[
         'Programming Language :: Python :: 3',

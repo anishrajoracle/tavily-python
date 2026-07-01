@@ -124,34 +124,20 @@ class TavilyHybridClient():
         cache_cleanup_interval_seconds (int): Minimum seconds between automatic cleanup attempts.
         '''
 
-        self.tavily = TavilyClient(api_key, session=session)
+        self.tavily = None
         self._managed_mongo_client = None
         self._managed_oracle_connection = None
 
-        if (
+        should_connect_mongodb = (
             db_provider == 'mongodb'
             and collection is None
             and any(value is not None for value in (mongo_uri, mongo_database, mongo_collection))
-        ):
-            self._managed_mongo_client, collection = connect_mongodb(
-                mongo_uri,
-                mongo_database,
-                mongo_collection,
-                mongo_client_kwargs=mongo_client_kwargs
-            )
-
-        if (
+        )
+        should_connect_oracle = (
             db_provider == 'oracle'
             and connection is None
             and any(value is not None for value in (oracle_user, oracle_password, oracle_dsn))
-        ):
-            connection = connect_oracle(
-                oracle_user,
-                oracle_password,
-                oracle_dsn,
-                oracle_connection_kwargs=oracle_connection_kwargs
-            )
-            self._managed_oracle_connection = connection
+        )
 
         self.database_provider: DatabaseProvider = get_provider(db_provider)
         if retrieval_mode not in RETRIEVAL_MODES:
@@ -247,14 +233,14 @@ class TavilyHybridClient():
         self.cache_timestamp_field = cache_timestamp_field
 
         if db_provider == 'mongodb':
-            if collection is None:
+            if collection is None and not should_connect_mongodb:
                 raise ValueError("collection is required when db_provider='mongodb'.")
             if index is None:
                 raise ValueError("index is required when db_provider='mongodb'.")
             self.embeddings_field = embeddings_field
             self.content_field = content_field
         elif db_provider == 'oracle':
-            if connection is None:
+            if connection is None and not should_connect_oracle:
                 raise ValueError("connection is required when db_provider='oracle'.")
             if table_name is None:
                 raise ValueError("table_name is required when db_provider='oracle'.")
@@ -293,7 +279,31 @@ class TavilyHybridClient():
         if not callable(self.ranking_function):
             raise TypeError("ranking_function must be callable.")
 
-        self.database_provider.validate_client(self)
+        try:
+            if should_connect_mongodb:
+                self._managed_mongo_client, collection = connect_mongodb(
+                    mongo_uri,
+                    mongo_database,
+                    mongo_collection,
+                    mongo_client_kwargs=mongo_client_kwargs
+                )
+                self.collection = collection
+
+            if should_connect_oracle:
+                connection = connect_oracle(
+                    oracle_user,
+                    oracle_password,
+                    oracle_dsn,
+                    oracle_connection_kwargs=oracle_connection_kwargs
+                )
+                self._managed_oracle_connection = connection
+                self.connection = connection
+
+            self.tavily = TavilyClient(api_key, session=session)
+            self.database_provider.validate_client(self)
+        except Exception:
+            self.close()
+            raise
 
     def search(self, query, max_results=10, max_local=None, max_foreign=None,
                save_foreign=False, **kwargs):

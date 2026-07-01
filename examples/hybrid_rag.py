@@ -5,13 +5,13 @@ from pymongo import MongoClient
 from pymongo.database import Database
 from tavily import TavilyHybridClient
 
-db: Database = MongoClient("MONGO_URI")["DATABASE_NAME"]
+db: Database = MongoClient(os.environ["MONGO_URI"])[os.environ["MONGO_DATABASE"]]
 
 hybrid_rag = TavilyHybridClient(
     api_key=os.environ["TAVILY_API_KEY"],
     db_provider='mongodb',
-    collection=db.get_collection('COLLECTION_NAME'),
-    index='vector_search',
+    collection=db.get_collection(os.environ["MONGO_COLLECTION"]),
+    index=os.environ["MONGO_INDEX"],
     embeddings_field='embeddings',
     content_field='content'
 )

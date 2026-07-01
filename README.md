@@ -274,6 +274,7 @@ for chunk in stream:
 `TavilyHybridClient` combines Tavily search with a local vector database. Tavily supplies fresh external results, while the local database stores reusable context for future retrieval.
 
 The Hybrid RAG API supports multiple database providers without requiring the SDK to own your database connection lifecycle.
+The default embedding and reranking helpers use Cohere, so install a provider extra such as `tavily-python[oracle]` / `tavily-python[mongodb]`, install `tavily-python[hybrid]`, or pass custom `embedding_function` and `ranking_function` callables.
 
 | Provider | Best for | Connection pattern |
 | --- | --- | --- |
@@ -332,7 +333,8 @@ Common setup issues are usually configuration-related:
 | Issue | Resolution |
 | --- | --- |
 | Missing Tavily API key | Set `TAVILY_API_KEY`, pass `api_key=...`, or provide a pre-authenticated custom session/client. |
-| Missing provider dependency | Install the optional provider extra, such as `python -m pip install -e ".[mongodb]"` or `python -m pip install -e ".[oracle]"`. |
+| Missing provider dependency | Install the optional provider extra, such as `python -m pip install -e ".[mongodb]"` or `python -m pip install -e ".[oracle]"`. These include Cohere for the default Hybrid RAG embedding/ranking helpers. |
+| Missing Cohere dependency or key | Install `python -m pip install -e ".[hybrid]"` and set `CO_API_KEY`, or pass explicit custom embedding/ranking functions. |
 | Database connection failure | Verify the connection string, credentials, service name, network access, and local database status. |
 | Vector search errors | Confirm the target collection/table has compatible embedding data and the configured vector index/search fields match your schema. |
 | Insert/persistence errors | Confirm the provider schema contains the fields required by the options you enabled. |

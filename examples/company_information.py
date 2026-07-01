@@ -32,7 +32,7 @@ Given the context above only, please extract and answer based on the following p
 - company_domain: What is the company's root site domain name?
 - description: What does this company do?
 - business_model: How does this company make money?
-- financials: If company is public, information from recent reports and stock performance.
+- financials: If the company is public, information from recent reports and stock performance.
 - recent_news: Recent news about the company
 - leadership_team: The leadership team (C-levels eg, CEO CFO CTO etc).
 - general_information: Any valuable or insightful information found in the context not yet mentioned.

@@ -295,3 +295,79 @@ def test_oracle_convenience_connection_params_create_connection(monkeypatch):
     }
     client.close()
     assert created["connection"].closed is True
+
+
+def test_oracle_convenience_connection_not_opened_when_validation_fails(monkeypatch):
+    created = {"connect_called": False}
+
+    def fake_connect(**_kwargs):
+        created["connect_called"] = True
+        raise AssertionError("Oracle connection should not be opened.")
+
+    monkeypatch.setitem(
+        sys.modules,
+        "oracledb",
+        types.SimpleNamespace(connect=fake_connect)
+    )
+
+    with pytest.raises(ValueError, match="oracle_upsert_key"):
+        TavilyHybridClient(
+            api_key="tvly-test",
+            db_provider="oracle",
+            oracle_user="intern_user",
+            oracle_password="intern_pass",
+            oracle_dsn="localhost:1521/FREEPDB1",
+            table_name="tavily_documents",
+            oracle_upsert_key="url",
+            embedding_function=lambda texts, _: [[0.1, 0.2, 0.3] for _ in texts],
+            ranking_function=lambda _, documents, __: documents,
+        )
+
+    assert created["connect_called"] is False
+
+
+def test_mongodb_managed_client_closes_when_provider_validation_fails(monkeypatch):
+    created = {}
+
+    class InvalidIndexCollection(FakeMongoCollection):
+        def list_search_indexes(self):
+            return []
+
+    class FakeMongoDatabase:
+        def __getitem__(self, name):
+            assert name == "documents"
+            return InvalidIndexCollection()
+
+    class FakeMongoClient:
+        def __init__(self, uri, **kwargs):
+            self.uri = uri
+            self.kwargs = kwargs
+            self.closed = False
+            created["client"] = self
+
+        def __getitem__(self, name):
+            assert name == "memory"
+            return FakeMongoDatabase()
+
+        def close(self):
+            self.closed = True
+
+    monkeypatch.setitem(
+        sys.modules,
+        "pymongo",
+        types.SimpleNamespace(MongoClient=FakeMongoClient)
+    )
+
+    with pytest.raises(ValueError, match="Index 'vector_search' does not exist"):
+        TavilyHybridClient(
+            api_key="tvly-test",
+            db_provider="mongodb",
+            mongo_uri="mongodb://localhost:27017",
+            mongo_database="memory",
+            mongo_collection="documents",
+            index="vector_search",
+            embedding_function=lambda texts, _: [[0.1, 0.2, 0.3] for _ in texts],
+            ranking_function=lambda _, documents, __: documents,
+        )
+
+    assert created["client"].closed is True

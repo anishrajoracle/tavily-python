@@ -39,7 +39,7 @@ The returned results use a simple origin marker:
 ```bash
 python -m venv .venv
 source .venv/bin/activate
-python -m pip install "tavily-python[oracle]" cohere
+python -m pip install "tavily-python[oracle]"
 ```
 
 The default embedding and reranking helpers use Cohere. If you already have an embedding and ranking stack, pass custom `embedding_function` and `ranking_function` callables to `TavilyHybridClient`.
@@ -339,4 +339,4 @@ Oracle local hybrid search uses the configured `vector_index_distance` for `VECT
 | Vector search errors | Confirm the database supports `VECTOR`, the column dimension matches your embedding model, and rows have embeddings. |
 | Cache always misses | Confirm `ADDED_AT` exists, has timestamps, and `cache_score_threshold` is not too high. |
 | Tavily keeps getting called in `hybrid_search` | That is expected when `max_foreign > 0`; use `freshness_cache` or `cache_then_memory` to avoid repeat Tavily calls. |
-| Default embedding/ranking errors | Install `cohere`, set `CO_API_KEY`, or pass custom `embedding_function` and `ranking_function`. |
+| Default embedding/ranking errors | Install the `oracle` or `hybrid` extra, set `CO_API_KEY`, or pass custom `embedding_function` and `ranking_function`. |
