@@ -113,7 +113,6 @@ class TavilyHybridClient():
         max_persisted_foreign (int): Optional cap on how many Tavily results are persisted per search.
         persist_score_threshold (float): Optional minimum Tavily score required before persisting a result.
         oracle_user (str): Optional Oracle username used to create a connection when connection is not provided.
-        oracle_password (str): Optional Oracle password used to create a connection when connection is not provided.
         oracle_dsn (str): Optional Oracle DSN used to create a connection when connection is not provided.
         oracle_connection_kwargs (dict): Extra keyword arguments forwarded to oracledb.connect().
         mongo_uri (str): Optional MongoDB URI used to create a collection when collection is not provided.

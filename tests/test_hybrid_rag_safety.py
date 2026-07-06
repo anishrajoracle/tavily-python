@@ -1,5 +1,6 @@
 import sys
 import types
+from unittest.mock import sentinel
 
 import pytest
 
@@ -278,7 +279,7 @@ def test_oracle_convenience_connection_params_create_connection(monkeypatch):
         api_key="tvly-test",
         db_provider="oracle",
         oracle_user="intern_user",
-        oracle_password="intern_pass",
+        oracle_password=sentinel.oracle_credential,
         oracle_dsn="localhost:1521/FREEPDB1",
         oracle_connection_kwargs={"config_dir": "/wallet"},
         table_name="tavily_documents",
@@ -289,7 +290,7 @@ def test_oracle_convenience_connection_params_create_connection(monkeypatch):
     assert client.connection is created["connection"]
     assert created["kwargs"] == {
         "user": "intern_user",
-        "password": "intern_pass",
+        "password": sentinel.oracle_credential,
         "dsn": "localhost:1521/FREEPDB1",
         "config_dir": "/wallet",
     }
@@ -315,7 +316,7 @@ def test_oracle_convenience_connection_not_opened_when_validation_fails(monkeypa
             api_key="tvly-test",
             db_provider="oracle",
             oracle_user="intern_user",
-            oracle_password="intern_pass",
+            oracle_password=sentinel.oracle_credential,
             oracle_dsn="localhost:1521/FREEPDB1",
             table_name="tavily_documents",
             oracle_upsert_key="url",
