@@ -34,7 +34,7 @@ except TavilyKeylessLimitError as e:
     print("retry after:", e.retry_after_seconds, "seconds")
 ```
 
-Keyless usage is rate-limited. For higher limits and the full set of endpoints (including `crawl`, `map`, and `research`), [sign up for a Tavily API key](https://tavily.com) and pass it as `TavilyClient(api_key="tvly-...")`.
+Keyless usage is rate-limited. For higher limits and the full set of endpoints (including `crawl`, `map`, and `research`), [sign up for a Tavily API key](https://tavily.com), set `TAVILY_API_KEY`, and create `TavilyClient()`.
 
 # Tavily Search
 
@@ -284,34 +284,38 @@ The default embedding and reranking helpers use Cohere, so install a provider ex
 MongoDB example:
 
 ```python
+import os
+
 from pymongo import MongoClient
 from tavily import TavilyHybridClient
 
-mongo = MongoClient("mongodb://localhost:27017")
-collection = mongo["my_db"]["my_collection"]
+mongo = MongoClient(os.environ["MONGO_URI"])
+collection = mongo[os.environ["MONGO_DATABASE"]][os.environ["MONGO_COLLECTION"]]
 
 client = TavilyHybridClient(
-    api_key="tvly-YOUR_API_KEY",
+    api_key=os.environ["TAVILY_API_KEY"],
     db_provider="mongodb",
     collection=collection,
-    index="vector_index_name",
+    index=os.environ["MONGO_INDEX"],
 )
 ```
 
 OracleDB example:
 
 ```python
+import os
+
 import oracledb
 from tavily import TavilyHybridClient
 
 connection = oracledb.connect(
-    user="YOUR_USER",
-    password="YOUR_PASSWORD",
-    dsn="host:1521/service",
+    user=os.environ["ORACLE_USER"],
+    password=os.environ["ORACLE_PASSWORD"],
+    dsn=os.environ["ORACLE_DSN"],
 )
 
 client = TavilyHybridClient(
-    api_key="tvly-YOUR_API_KEY",
+    api_key=os.environ["TAVILY_API_KEY"],
     db_provider="oracle",
     connection=connection,
     table_name="TAVILY_DOCUMENTS",
@@ -418,11 +422,13 @@ response = await client.search("latest AI research")
 Set them once at client init, or per-call (per-call wins):
 
 ```python
+import os
+
 from tavily import TavilyClient
 
 # Client-level — applied to every request
 client = TavilyClient(
-    api_key="tvly-YOUR_API_KEY",
+    api_key=os.environ["TAVILY_API_KEY"],
     session_id="my-session-123",
     human_id="internal-user-id-42",
     client_name="my-app",

@@ -137,7 +137,7 @@ def test_async_research_specific(async_interceptor, async_client):
             pass
         return response
     
-    response = asyncio.run(run_test())
+    asyncio.run(run_test())
     request = async_interceptor.get_request()
     validate_research_specific(request, dummy_queued_response)
 
@@ -146,4 +146,3 @@ def test_async_get_research(async_interceptor, async_client):
     response = asyncio.run(async_client.get_research("test-request-123"))
     request = async_interceptor.get_request()
     validate_get_research(request, response)
-

@@ -9,7 +9,6 @@ from .utils import get_max_items_from_list
 from .errors import (
     UsageLimitExceededError,
     InvalidAPIKeyError,
-    MissingAPIKeyError,
     BadRequestError,
     ForbiddenError,
     TimeoutError,

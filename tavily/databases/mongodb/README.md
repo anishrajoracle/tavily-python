@@ -25,17 +25,19 @@ Oracle-only modes such as `freshness_cache` and `cache_then_memory` are intentio
 Your application can either pass an existing MongoDB collection:
 
 ```python
+import os
+
 from pymongo import MongoClient
 from tavily import TavilyHybridClient
 
-mongo = MongoClient("mongodb://localhost:27017")
-collection = mongo["my_database"]["my_collection"]
+mongo = MongoClient(os.environ["MONGO_URI"])
+collection = mongo[os.environ["MONGO_DATABASE"]][os.environ["MONGO_COLLECTION"]]
 
 client = TavilyHybridClient(
-    api_key="tvly-YOUR_API_KEY",
+    api_key=os.environ["TAVILY_API_KEY"],
     db_provider="mongodb",
     collection=collection,
-    index="vector_search_index",
+    index=os.environ["MONGO_INDEX"],
     embeddings_field="embeddings",
     content_field="content",
 )
@@ -44,15 +46,17 @@ client = TavilyHybridClient(
 Or use the convenience connection parameters:
 
 ```python
+import os
+
 from tavily import TavilyHybridClient
 
 client = TavilyHybridClient(
-    api_key="tvly-YOUR_API_KEY",
+    api_key=os.environ["TAVILY_API_KEY"],
     db_provider="mongodb",
-    mongo_uri="mongodb://localhost:27017",
-    mongo_database="my_database",
-    mongo_collection="my_collection",
-    index="vector_search_index",
+    mongo_uri=os.environ["MONGO_URI"],
+    mongo_database=os.environ["MONGO_DATABASE"],
+    mongo_collection=os.environ["MONGO_COLLECTION"],
+    index=os.environ["MONGO_INDEX"],
 )
 ```
 

@@ -5,15 +5,10 @@ This script uses real Tavily + real OracleDB connections. No fake clients.
 Quick start:
   1) Install deps in your venv:
        python -m pip install -e ".[oracle]"
-  2) Set env vars for Tavily + your DB provider.
+  2) Configure the required local values described in .env.example.
   3) Run one of the demos below.
 
 Oracle freshness cache demo (repeat query to show cache behavior):
-  export TAVILY_API_KEY="tvly-..."
-  export ORACLE_USER="..."
-  export ORACLE_PASSWORD="..."
-  export ORACLE_DSN="host:1521/service"
-  export ORACLE_TABLE="TAVILY_DOCUMENTS"
   python examples/demo_integration_cache_hybrid.py \
     --oracle-retrieval-mode freshness_cache \
     --query "latest Oracle vector search features" \

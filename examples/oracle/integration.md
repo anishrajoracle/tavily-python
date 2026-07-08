@@ -46,13 +46,14 @@ The default embedding and reranking helpers use Cohere. If you already have an e
 
 ### 2. Set environment variables
 
-```bash
-export TAVILY_API_KEY="tvly-YOUR_API_KEY"
-export CO_API_KEY="YOUR_COHERE_API_KEY"
+Create an untracked `.env` file from `.env.example`, populate the required
+values locally, and load it into the current shell when running standalone
+examples:
 
-export ORACLE_USER="YOUR_USER"
-export ORACLE_PASSWORD="YOUR_PASSWORD"
-export ORACLE_DSN="host:1521/service"
+```bash
+set -a
+source .env
+set +a
 ```
 
 `ORACLE_DSN` can point at Oracle Database 23ai, Oracle Free, or a compatible Oracle Database service with vector support.
